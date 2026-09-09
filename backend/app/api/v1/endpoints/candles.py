@@ -24,7 +24,7 @@ def get_sync_status(
             detail=f"Source ID '{source_id}' not found. Please handshake first."
         )
 
-    return sync_orchestrator.get_sync_status(source_id, symbol.upper(), timeframe)
+    return sync_orchestrator.get_sync_status(source_id, symbol, timeframe)
 
 @router.post("/batch")
 def ingest_candle_batch(

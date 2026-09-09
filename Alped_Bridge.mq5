@@ -24,6 +24,9 @@ input int      InpBatchSize         = 200;                         // Max Bars P
 input int      InpQueueCapacity     = 2000;                        // Max In-Memory Candle Queue
 input int      InpEventQueueMax     = 500;                         // Max In-Memory Event Queue
 
+input group "=== GAP BACKFILL CONFIGURATION ==="
+input int      InpMaxBackfillBars   = 5000;                        // Max Bars per Gap Backfill (safety cap)
+
 input group "=== TIMEFRAMES SUBSCRIPTION ==="
 input bool     InpEnableM1          = true;                        // Sync M1
 input bool     InpEnableM5          = true;                        // Sync M5
@@ -368,7 +371,7 @@ bool SyncSymbolMetadata()
 }
 
 //+------------------------------------------------------------------+
-//| STEP 3: HISTORICAL & RECOVERY SYNC                               |
+//| STEP 3: HISTORICAL & RECOVERY SYNC (GAP DETECTION & BACKFILL)   |
 //+------------------------------------------------------------------+
 bool PerformTfHistoricalSync(ENUM_TIMEFRAMES tf, string tf_name)
 {
@@ -393,20 +396,59 @@ bool PerformTfHistoricalSync(ENUM_TIMEFRAMES tf, string tf_name)
          latest_epoch = StringToInteger(epoch_str);
    }
 
-   int bars_to_fetch = InpInitialSyncBars;
-   if(bars_to_fetch <= 0)
+   datetime now_broker = TimeCurrent();
+   int gmt_offset = GetBrokerGmtOffset();
+   long now_epoch = (long)(now_broker - gmt_offset);
+
+   int bars_to_fetch = 0;
+   string sync_type = "";
+
+   if(latest_epoch <= 0)
    {
-      PrintFormat("[Alped_Bridge] InitialSyncBars is 0. Skipping historical bars for %s (Pure Live Mode).", tf_name);
-      return true;
+      // No prior data for this symbol + timeframe in DB -> fallback to InpInitialSyncBars
+      bars_to_fetch = InpInitialSyncBars;
+      sync_type = "INITIAL_SYNC";
+
+      if(bars_to_fetch <= 0)
+      {
+         PrintFormat("[Alped_Bridge] No prior data & InitialSyncBars=0 for %s. Skipping (Pure Live Mode).", tf_name);
+         return true;
+      }
+      PrintFormat("[Alped_Bridge] Initial sync requested for %s: %d bars.", tf_name, bars_to_fetch);
    }
-   string sync_type = "INITIAL_SYNC";
+   else
+   {
+      // Prior data exists in DB -> calculate gap
+      long gap_seconds = now_epoch - latest_epoch;
+      int bar_seconds = PeriodSeconds(tf);
+
+      if(gap_seconds <= bar_seconds)
+      {
+         PrintFormat("[Alped_Bridge] No gap for %s (gap=%d s, bar=%d s). Data up to date.", tf_name, (int)gap_seconds, bar_seconds);
+         return true;
+      }
+
+      int missing_bars = (int)(gap_seconds / bar_seconds) + 2; // +2 safety buffer
+      if(missing_bars > InpMaxBackfillBars)
+      {
+         PrintFormat("[Alped_Bridge] WARNING: Gap for %s is %d bars, exceeding InpMaxBackfillBars (%d). Backfilling latest %d bars.",
+                     tf_name, missing_bars, InpMaxBackfillBars, InpMaxBackfillBars);
+      }
+      bars_to_fetch = MathMin(missing_bars, InpMaxBackfillBars);
+      sync_type = "GAP_BACKFILL";
+
+      PrintFormat("[Alped_Bridge] Gap detected for %s: %d seconds (~%d bars requested, cap=%d). Backfilling...",
+                  tf_name, (int)gap_seconds, bars_to_fetch, InpMaxBackfillBars);
+   }
 
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    int copied = CopyRates(_Symbol, tf, 1, bars_to_fetch, rates);
-   if(copied <= 0) return true; // No data to copy
-
-   int gmt_offset = GetBrokerGmtOffset();
+   if(copied <= 0)
+   {
+      PrintFormat("[Alped_Bridge] No broker historical bars returned for %s (market closed or empty).", tf_name);
+      return true;
+   }
 
    // Send in chunks of InpBatchSize
    for(int i = copied - 1; i >= 0; i -= InpBatchSize)
@@ -446,10 +488,14 @@ bool PerformTfHistoricalSync(ENUM_TIMEFRAMES tf, string tf_name)
 
       string resp;
       int c_code;
-      HttpSend("POST", "/api/v1/candles/batch", batch_json, resp, c_code);
+      if(!HttpSend("POST", "/api/v1/candles/batch", batch_json, resp, c_code))
+      {
+         PrintFormat("[Alped_Bridge] Failed to send %s batch for %s (HTTP %d). Aborting chunk sync for retry.", sync_type, tf_name, c_code);
+         return false;
+      }
    }
 
-   PrintFormat("[Alped_Bridge] Synced %d historical bars for %s (%s).", copied, _Symbol, tf_name);
+   PrintFormat("[Alped_Bridge] %s completed: %d bars synced for %s (%s).", sync_type, copied, _Symbol, tf_name);
    return true;
 }
 
@@ -957,6 +1003,13 @@ void OnTimer()
             if(PerformTfHistoricalSync(tf, tf_name))
             {
                g_CurrentSyncTfIdx++;
+               g_BackoffSeconds = 1;
+            }
+            else
+            {
+               g_BackoffSeconds = MathMin(g_BackoffSeconds * 2, 60);
+               g_NextAllowedNetOp = now + g_BackoffSeconds;
+               PrintFormat("[Alped_Bridge] Sync failed for %s. Retrying in %d seconds...", tf_name, g_BackoffSeconds);
             }
          }
          else

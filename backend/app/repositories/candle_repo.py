@@ -12,6 +12,11 @@ class CandleRepository:
         if not candles:
             return 0
 
+        # In-memory idempotent store
+        for c in candles:
+            key = (c["source_id"], c["symbol"], c["timeframe"], c["candle_time_utc"])
+            _memory_candles[key] = c
+
         client = get_supabase_client()
         if client:
             try:
@@ -24,13 +29,7 @@ class CandleRepository:
             except Exception as e:
                 logger.error(f"[CandleRepo] Supabase upsert error: {type(e).__name__}: {e}")
 
-        # In-memory idempotent store
-        count = 0
-        for c in candles:
-            key = (c["source_id"], c["symbol"], c["timeframe"], c["candle_time_utc"])
-            _memory_candles[key] = c
-            count += 1
-        return count
+        return len(candles)
 
     def get_latest_candle(self, source_id: str, symbol: str, timeframe: str) -> Optional[dict]:
         client = get_supabase_client()
@@ -38,7 +37,7 @@ class CandleRepository:
             try:
                 res = client.table("market_candles").select("*")\
                     .eq("source_id", source_id)\
-                    .eq("symbol", symbol)\
+                    .ilike("symbol", symbol)\
                     .eq("timeframe", timeframe)\
                     .order("candle_time_utc", desc=True)\
                     .limit(1)\
@@ -51,7 +50,7 @@ class CandleRepository:
         # Search in-memory
         matching = [
             c for (s_id, sym, tf, _), c in _memory_candles.items()
-            if s_id == source_id and sym == symbol and tf == timeframe
+            if s_id == source_id and sym.upper() == symbol.upper() and tf.upper() == timeframe.upper()
         ]
         if not matching:
             return None
@@ -61,16 +60,17 @@ class CandleRepository:
         if not gaps:
             return 0
 
+        _memory_gaps.extend(gaps)
+
         client = get_supabase_client()
         if client:
             try:
                 res = client.table("candle_gaps").insert(gaps).execute()
                 if res.data:
                     return len(res.data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[CandleRepo] Supabase record_gaps error: {e}")
 
-        _memory_gaps.extend(gaps)
         return len(gaps)
 
 candle_repo = CandleRepository()

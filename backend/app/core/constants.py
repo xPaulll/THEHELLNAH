@@ -54,6 +54,7 @@ class StrategyMode(str, Enum):
 class SyncType(str, Enum):
     INITIAL_SYNC = "INITIAL_SYNC"
     RECOVERY_SYNC = "RECOVERY_SYNC"
+    GAP_BACKFILL = "GAP_BACKFILL"
     LIVE_SYNC = "LIVE_SYNC"
 
 class TickMode(str, Enum):

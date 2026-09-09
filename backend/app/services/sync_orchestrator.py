@@ -48,12 +48,12 @@ class SyncOrchestrator:
                 "broker_time": c.broker_time,
                 "broker_gmt_offset": c.broker_gmt_offset,
                 "session": session_tag,
-                "is_gap_recovered": (payload.sync_type == SyncType.RECOVERY_SYNC),
+                "is_gap_recovered": (payload.sync_type in (SyncType.RECOVERY_SYNC, SyncType.GAP_BACKFILL)),
                 "payload_version": payload.payload_version,
                 "schema_version": payload.schema_version
             })
 
-        # 2. Timeline Gap Scanning
+        # 2. Timeline Gap Scanning within batch
         gaps = detect_timeline_gaps(
             candles=payload.candles,
             timeframe=timeframe_str,
@@ -63,7 +63,28 @@ class SyncOrchestrator:
         if gaps:
             candle_repo.record_gaps(gaps)
 
-        # 3. Idempotent Upsert
+        # 3. Record gap recovery event in candle_gaps if GAP_BACKFILL / RECOVERY_SYNC
+        if payload.sync_type in (SyncType.GAP_BACKFILL, SyncType.RECOVERY_SYNC) and prepared_rows:
+            from datetime import datetime, timezone
+            from backend.app.core.constants import TIMEFRAME_SECONDS, GapStatus
+            now_iso = datetime.now(timezone.utc).isoformat()
+            sorted_rows = sorted(prepared_rows, key=lambda x: x["candle_time_epoch"])
+            backfill_audit = {
+                "source_id": source_id,
+                "symbol": symbol,
+                "timeframe": timeframe_str,
+                "gap_start_utc": sorted_rows[0]["candle_time_utc"],
+                "gap_end_utc": sorted_rows[-1]["candle_time_utc"],
+                "expected_interval_seconds": TIMEFRAME_SECONDS.get(timeframe_str, 60),
+                "missing_bars_count": len(sorted_rows),
+                "status": GapStatus.RECOVERED.value,
+                "classification_reason": f"Backfilled {len(sorted_rows)} bars via {payload.sync_type.value}",
+                "detected_at": now_iso,
+                "recovered_at": now_iso
+            }
+            candle_repo.record_gaps([backfill_audit])
+
+        # 4. Idempotent Upsert
         inserted_count = candle_repo.upsert_candles(prepared_rows)
 
         return {
