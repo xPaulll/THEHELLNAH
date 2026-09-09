@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alped Punya V3 — Market Data Center</title>
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="terminal-dark">
+  <div class="app-layout">
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-badge">V3</div>
+        <div class="brand-text">
+          <span class="brand-title">ALPED PUNYA</span>
+          <span class="brand-subtitle">DATA CENTER</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section-label">CORE INFRASTRUCTURE</div>
+        <button class="nav-item active" data-view="overview" id="nav-overview">
+          <span class="nav-icon">📊</span>
+          <span class="nav-label">Overview</span>
+        </button>
+        <button class="nav-item" data-view="market-data" id="nav-market-data">
+          <span class="nav-icon">📈</span>
+          <span class="nav-label">Market Data</span>
+        </button>
+        <button class="nav-item" data-view="data-quality" id="nav-data-quality">
+          <span class="nav-icon">🛡️</span>
+          <span class="nav-label">Data Quality</span>
+        </button>
+        <button class="nav-item" data-view="system" id="nav-system">
+          <span class="nav-icon">⚙️</span>
+          <span class="nav-label">System</span>
+        </button>
+        <button class="nav-item" data-view="logs" id="nav-logs">
+          <span class="nav-icon">📜</span>
+          <span class="nav-label">Logs</span>
+        </button>
+
+        <div class="nav-section-label">FUTURE ENGINES</div>
+        <div class="nav-item disabled" title="Available in future phase">
+          <span class="nav-icon">🧠</span>
+          <span class="nav-label">Feature Engine</span>
+          <span class="badge-soon">Soon</span>
+        </div>
+        <div class="nav-item disabled" title="Available in future phase">
+          <span class="nav-icon">⚡</span>
+          <span class="nav-label">Signal Engine</span>
+          <span class="badge-soon">Soon</span>
+        </div>
+        <div class="nav-item disabled" title="Available in future phase">
+          <span class="nav-icon">🔒</span>
+          <span class="nav-label">Risk Engine</span>
+          <span class="badge-soon">Soon</span>
+        </div>
+        <div class="nav-item disabled" title="Available in future phase">
+          <span class="nav-icon">🎯</span>
+          <span class="nav-label">Execution</span>
+          <span class="badge-soon">Soon</span>
+        </div>
+
+        <div class="nav-section-label">MONITORING</div>
+        <div class="nav-item disabled" title="Available in future phase">
+          <span class="nav-icon">📋</span>
+          <span class="nav-label">Trades</span>
+          <span class="badge-soon">Soon</span>
+        </div>
+        <div class="nav-item disabled" title="Available in future phase">
+          <span class="nav-icon">📉</span>
+          <span class="nav-label">Performance</span>
+          <span class="badge-soon">Soon</span>
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="mode-indicator">
+          <span class="mode-dot"></span>
+          <span class="mode-text">V1 DATA COLLECTOR</span>
+        </div>
+        <div class="safety-lock">EXECUTION: LOCKED</div>
+      </div>
+    </aside>
+
+    <!-- MAIN CONTENT WRAPPER -->
+    <div class="main-wrapper">
+      <!-- TOP HEADER -->
+      <header class="top-header">
+        <div class="header-left">
+          <h1 class="page-title" id="current-view-title">MISSION CONTROL</h1>
+          <div class="header-tags">
+            <span class="tag-badge session-badge" id="header-session-tag">SESSION: DETECTING...</span>
+            <span class="tag-badge symbol-badge" id="header-symbol-tag">XAUUSD.vx</span>
+            <span class="tag-badge ws-badge" id="header-ws-tag">WS: CONNECTING</span>
+          </div>
+        </div>
+
+        <div class="header-center">
+          <div class="live-clock">
+            <div class="clock-item">
+              <span class="clock-label">WIB</span>
+              <span class="clock-value mono" id="clock-wib">--:--:--</span>
+            </div>
+            <div class="clock-divider">|</div>
+            <div class="clock-item">
+              <span class="clock-label">UTC</span>
+              <span class="clock-value mono" id="clock-utc">--:--:--</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="header-right">
+          <div class="pipeline-pill" id="pipeline-status-pill">
+            <span class="pill-dot pulse-green"></span>
+            <span class="pill-text" id="pipeline-status-text">INITIALIZING...</span>
+          </div>
+          <button class="btn-refresh" id="btn-manual-refresh" title="Force refresh data">
+            <span class="refresh-icon">🔄</span>
+            <span class="refresh-text">Refresh</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- VIEW CONTAINER -->
+      <main class="content-area">
+        <!-- 1. OVERVIEW VIEW (DEFAULT) -->
+        <section class="view-panel active" id="view-overview">
+          <!-- SECTION 1: SYSTEM STATUS -->
+          <div class="section-container">
+            <div class="section-header">
+              <h2 class="section-title">SYSTEM STATUS</h2>
+              <span class="section-subtitle">Real-time health of MT5, FastAPI bridge, and Supabase database</span>
+            </div>
+
+            <div class="cards-grid-4" id="system-status-cards">
+              <!-- MT5 CARD -->
+              <div class="metric-card" id="card-status-mt5">
+                <div class="card-header-row">
+                  <span class="card-label">MT5 BRIDGE</span>
+                  <span class="status-pill status-unknown" id="mt5-pill">⚪ CHECKING</span>
+                </div>
+                <div class="card-body-compact">
+                  <div class="meta-row">
+                    <span class="meta-key">Last Heartbeat</span>
+                    <span class="meta-val mono" id="mt5-heartbeat">--:--:--</span>
+                  </div>
+                  <div class="meta-row">
+                    <span class="meta-key">Broker / Env</span>
+                    <span class="meta-val mono" id="mt5-broker">N/A</span>
+                  </div>
+                  <div class="meta-row">
+                    <span class="meta-key">EA Identifier</span>
+                    <span class="meta-val mono" id="mt5-ea-id">N/A</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- FASTAPI CARD -->
+              <div class="metric-card" id="card-status-fastapi">
+                <div class="card-header-row">
+                  <span class="card-label">FASTAPI BACKEND</span>
+                  <span class="status-pill status-unknown" id="fastapi-pill">⚪ CHECKING</span>
+                </div>
+                <div class="card-body-compact">
+                  <div class="meta-row">
+                    <span class="meta-key">Uptime</span>
+                    <span class="meta-val mono" id="fastapi-uptime">--</span>
+                  </div>
+                  <div class="meta-row">
+                    <span class="meta-key">Port / Host</span>
+                    <span class="meta-val mono" id="fastapi-host">127.0.0.1:8000</span>
+                  </div>
+                  <div class="meta-row">
+                    <span class="meta-key">Schema Version</span>
+                    <span class="meta-val mono" id="fastapi-version">1.0.0</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- SUPABASE CARD -->
+              <div class="metric-card" id="card-status-supabase">
+                <div class="card-header-row">
+                  <span class="card-label">SUPABASE DB</span>
+                  <span class="status-pill status-unknown" id="supabase-pill">⚪ CHECKING</span>
+                </div>
+                <div class="card-body-compact">
+                  <div class="meta-row">
+                    <span class="meta-key">Latency</span>
+                    <span class="meta-val mono" id="supabase-latency">-- ms</span>
+                  </div>
+                  <div class="meta-row">
+                    <span class="meta-key">Region</span>
+                    <span class="meta-val mono">Singapore (AWS)</span>
+                  </div>
+                  <div class="meta-row">
+                    <span class="meta-key">Storage Status</span>
+                    <span class="meta-val mono" id="supabase-storage">ONLINE</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- PIPELINE CARD -->
+              <div class="metric-card" id="card-status-pipeline">
+                <div class="card-header-row">
+                  <span class="card-label">DATA PIPELINE</span>
+                  <span class="status-pill status-unknown" id="pipeline-pill">⚪ CHECKING</span>
+                </div>
+                <div class="card-body-compact">
+                  <div class="meta-row">
+                    <span class="meta-key">Collection Mode</span>
+                    <span class="meta-val mono">RAW_COLLECTOR</span>
+                  </div>
+                  <div class="meta-row">
+                    <span class="meta-key">Execution Lock</span>
+                    <span class="meta-val mono text-safe">SECURE (OFF)</span>
+                  </div>
+                  <div class="meta-row">
+                    <span class="meta-key">Total Ingested</span>
+                    <span class="meta-val mono" id="pipeline-total-candles">0 bars</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SECTION 2: LIVE MARKET CONTROL CENTER & CANDLESTICK CHART -->
+          <div class="section-container">
+            <!-- MARKET HEADER -->
+            <div class="market-hero-card">
+              <div class="market-hero-left">
+                <div class="hero-sym-row">
+                  <span class="hero-symbol">XAUUSD.vx</span>
+                  <span class="hero-asset-name">Gold / US Dollar</span>
+                  <span class="badge-pill badge-live" id="market-liveness-badge">● LIVE</span>
+                </div>
+                <div class="hero-price-row">
+                  <span class="price-val mono" id="live-market-price">--.--</span>
+                  <span class="price-type-tag" id="live-price-label">LIVE BID</span>
+                  <div class="tick-metrics-strip">
+                    <span class="tick-chip">BID <strong class="mono" id="live-bid">--.--</strong></span>
+                    <span class="tick-chip">ASK <strong class="mono" id="live-ask">--.--</strong></span>
+                    <span class="tick-chip">SPREAD <strong class="mono" id="live-spread">--</strong></span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- TIMEFRAME SELECTOR TOOLBAR -->
+              <div class="market-hero-right">
+                <div class="chart-tf-toolbar" id="chart-tf-toolbar">
+                  <button class="chart-tf-btn active" data-chart-tf="M1">M1</button>
+                  <button class="chart-tf-btn" data-chart-tf="M5">M5</button>
+                  <button class="chart-tf-btn" data-chart-tf="M15">M15</button>
+                  <button class="chart-tf-btn" data-chart-tf="M30">M30</button>
+                  <button class="chart-tf-btn" data-chart-tf="H1">H1</button>
+                  <button class="chart-tf-btn" data-chart-tf="H4">H4</button>
+                  <button class="chart-tf-btn" data-chart-tf="D1">D1</button>
+                </div>
+                <div class="chart-status-meta">
+                  <span class="meta-dot"></span>
+                  <span id="chart-tf-status-text">M1 · Realtime Stream</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- TRADINGVIEW LIGHTWEIGHT CHART CANVAS -->
+            <div class="chart-canvas-wrapper">
+              <div id="tv-chart-container"></div>
+              <div class="chart-watermark" id="chart-watermark">ALPED PUNYA V3 · XAUUSD</div>
+            </div>
+
+            <!-- BAR 0 FORMING CANDLE DETAIL STRIP -->
+            <div class="bar0-details-strip">
+              <div class="bar0-status-badge">
+                <span class="pulse-dot-amber"></span>
+                <span id="bar0-status-title">BAR 0 (<span id="bar0-tf-name">M1</span>) FORMING</span>
+              </div>
+              <div class="bar0-metrics-grid">
+                <div class="b0-box"><span class="b0-label">OPEN</span><span class="b0-val mono" id="bar0-open">--.--</span></div>
+                <div class="b0-box"><span class="b0-label">HIGH</span><span class="b0-val mono" id="bar0-high">--.--</span></div>
+                <div class="b0-box"><span class="b0-label">LOW</span><span class="b0-val mono" id="bar0-low">--.--</span></div>
+                <div class="b0-box"><span class="b0-label">CLOSE</span><span class="b0-val mono" id="bar0-close">--.--</span></div>
+                <div class="b0-box"><span class="b0-label">AGE</span><span class="b0-val mono" id="bar0-age">--:--</span></div>
+                <div class="b0-box"><span class="b0-label">CLOSE IN</span><span class="b0-val mono text-accent font-bold" id="bar0-countdown">--:--</span></div>
+              </div>
+            </div>
+
+            <!-- MULTI-TIMEFRAME BAR 0 STATUS CHIPS -->
+            <div class="tf-chips-container">
+              <div class="tf-chips-label">SUBSCRIBED TIMEFRAMES:</div>
+              <div class="tf-chips-grid" id="tf-chips-grid">
+                <div class="tf-chip" id="chip-M1"><span class="tf-chip-name">M1</span> <span class="tf-chip-status mono">● LIVE</span></div>
+                <div class="tf-chip" id="chip-M5"><span class="tf-chip-name">M5</span> <span class="tf-chip-status mono">● LIVE</span></div>
+                <div class="tf-chip" id="chip-M15"><span class="tf-chip-name">M15</span> <span class="tf-chip-status mono">● LIVE</span></div>
+                <div class="tf-chip" id="chip-M30"><span class="tf-chip-name">M30</span> <span class="tf-chip-status mono">● LIVE</span></div>
+                <div class="tf-chip" id="chip-H1"><span class="tf-chip-name">H1</span> <span class="tf-chip-status mono">● LIVE</span></div>
+                <div class="tf-chip" id="chip-H4"><span class="tf-chip-name">H4</span> <span class="tf-chip-status mono">● LIVE</span></div>
+                <div class="tf-chip" id="chip-D1"><span class="tf-chip-name">D1</span> <span class="tf-chip-status mono">● LIVE</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SECTION 3: DATA QUALITY & ACCOUNT OVERVIEW (2 COLS) -->
+          <div class="grid-2-cols">
+            <!-- DATA QUALITY PANEL -->
+            <div class="section-container">
+              <div class="section-header">
+                <h2 class="section-title">DATA QUALITY</h2>
+                <span class="section-subtitle">Real-time timeline integrity & gap monitoring</span>
+              </div>
+              <div class="cards-grid-3">
+                <div class="stat-box">
+                  <span class="stat-label">MISSING CANDLES</span>
+                  <span class="stat-num mono text-good" id="dq-missing">0</span>
+                  <span class="stat-note">Market timeline gaps</span>
+                </div>
+                <div class="stat-box">
+                  <span class="stat-label">RECOVERED</span>
+                  <span class="stat-num mono text-accent" id="dq-recovered">0</span>
+                  <span class="stat-note">Auto-gap backfills</span>
+                </div>
+                <div class="stat-box">
+                  <span class="stat-label">INTEGRITY SCORE</span>
+                  <span class="stat-num mono text-good" id="dq-score">100%</span>
+                  <span class="stat-note">Zero data corruption</span>
+                </div>
+              </div>
+              <div class="dq-meta-bar">
+                <span>Last Validation: <span class="mono" id="dq-last-validation">Continuous</span></span>
+                <span>Rejected Bars: <span class="mono" id="dq-rejected">0</span></span>
+                <span>Duplicates: <span class="mono" id="dq-duplicates">0</span></span>
+              </div>
+            </div>
+
+            <!-- ACCOUNT PANEL -->
+            <div class="section-container">
+              <div class="section-header">
+                <h2 class="section-title">ACCOUNT TELEMETRY</h2>
+                <span class="section-subtitle">Live balance, margin & open positions snapshot</span>
+              </div>
+              <div class="cards-grid-3">
+                <div class="stat-box">
+                  <span class="stat-label">BALANCE</span>
+                  <span class="stat-num mono" id="acc-balance">N/A</span>
+                  <span class="stat-note">Deposited funds</span>
+                </div>
+                <div class="stat-box">
+                  <span class="stat-label">EQUITY</span>
+                  <span class="stat-num mono" id="acc-equity">N/A</span>
+                  <span class="stat-note">Net liquidation</span>
+                </div>
+                <div class="stat-box">
+                  <span class="stat-label">FLOATING P/L</span>
+                  <span class="stat-num mono" id="acc-pnl">N/A</span>
+                  <span class="stat-note" id="acc-positions-note">0 active positions</span>
+                </div>
+              </div>
+              <div class="dq-meta-bar">
+                <span>Free Margin: <span class="mono" id="acc-free-margin">N/A</span></span>
+                <span>Used Margin: <span class="mono" id="acc-margin">N/A</span></span>
+                <span>Snapshot Age: <span class="mono" id="acc-snapshot-age">N/A</span></span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. MARKET DATA VIEW -->
+        <section class="view-panel" id="view-market-data">
+          <div class="section-container">
+            <div class="section-header">
+              <div class="header-with-badge">
+                <h2 class="section-title">XAUUSD — HISTORICAL CANDLE INSPECTOR</h2>
+                <div class="tf-selector-group">
+                  <button class="tf-btn active" data-tf="M1">M1</button>
+                  <button class="tf-btn" data-tf="M5">M5</button>
+                  <button class="tf-btn" data-tf="M15">M15</button>
+                  <button class="tf-btn" data-tf="M30">M30</button>
+                  <button class="tf-btn" data-tf="H1">H1</button>
+                  <button class="tf-btn" data-tf="H4">H4</button>
+                  <button class="tf-btn" data-tf="D1">D1</button>
+                </div>
+              </div>
+              <span class="section-subtitle">Inspecting latest 50 verified closed bars stored in Supabase PostgreSQL</span>
+            </div>
+
+            <div class="table-card">
+              <table class="data-table" id="table-historical-candles">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>CANDLE TIME (WIB)</th>
+                    <th>CANDLE TIME (UTC)</th>
+                    <th>OPEN</th>
+                    <th>HIGH</th>
+                    <th>LOW</th>
+                    <th>CLOSE</th>
+                    <th>VOLUME</th>
+                    <th>SPREAD</th>
+                    <th>SESSION</th>
+                    <th>STATUS</th>
+                  </tr>
+                </thead>
+                <tbody id="historical-candles-tbody">
+                  <tr><td colspan="11" class="loading-cell">Select a timeframe to inspect closed candles.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. DATA QUALITY VIEW -->
+        <section class="view-panel" id="view-data-quality">
+          <div class="section-container">
+            <div class="section-header">
+              <h2 class="section-title">DATA QUALITY & RECOVERY AUDIT</h2>
+              <span class="section-subtitle">Detailed timeline gap logs and sanity verification metrics</span>
+            </div>
+
+            <div class="cards-grid-4">
+              <div class="stat-box">
+                <span class="stat-label">TOTAL CANDLES</span>
+                <span class="stat-num mono" id="dq-page-total">0</span>
+                <span class="stat-note">Across all 7 timeframes</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">SCHEDULE GAPS</span>
+                <span class="stat-num mono text-good" id="dq-page-gaps">0</span>
+                <span class="stat-note">Excludes weekend closes</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">RECOVERED BARS</span>
+                <span class="stat-num mono text-accent" id="dq-page-rec">0</span>
+                <span class="stat-note">Auto-healed by MT5</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">SANITY REJECTIONS</span>
+                <span class="stat-num mono text-good">0</span>
+                <span class="stat-note">High &gt;= Low, Spreads &gt; 0</span>
+              </div>
+            </div>
+
+            <div class="table-card" style="margin-top: 1.5rem;">
+              <div class="card-inner-title">TIMEFRAME DISTRIBUTION</div>
+              <table class="data-table" id="table-dq-distribution">
+                <thead>
+                  <tr>
+                    <th>TIMEFRAME</th>
+                    <th>STORED BARS</th>
+                    <th>LATEST TIMESTAMP (WIB)</th>
+                    <th>FRESHNESS</th>
+                    <th>INTEGRITY STATUS</th>
+                  </tr>
+                </thead>
+                <tbody id="dq-distribution-tbody">
+                  <!-- Dynamically populated -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4. SYSTEM VIEW (WITH REALTIME AUDIT STREAM) -->
+        <section class="view-panel" id="view-system">
+          <div class="section-container">
+            <div class="section-header">
+              <h2 class="section-title">SYSTEM ARCHITECTURE & LATENCY METRICS</h2>
+              <span class="section-subtitle">Direct infrastructure topology with genuine measured telemetry (No fake numbers)</span>
+            </div>
+
+            <!-- LATENCY METRICS ROW -->
+            <div class="cards-grid-4" style="margin-bottom: 1.5rem;">
+              <div class="stat-box">
+                <span class="stat-label">MT5 HEARTBEAT AGE</span>
+                <span class="stat-num mono" id="sys-mt5-hb">--</span>
+                <span class="stat-note">Elapsed since last MT5 packet</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">WEBSOCKET RTT</span>
+                <span class="stat-num mono text-accent" id="sys-ws-rtt">-- ms</span>
+                <span class="stat-note">Ping/pong round-trip latency</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">SUPABASE QUERY LATENCY</span>
+                <span class="stat-num mono" id="sys-supabase-ping">-- ms</span>
+                <span class="stat-note">FastAPI ➔ Supabase response</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">FASTAPI INTERNAL LATENCY</span>
+                <span class="stat-num mono text-good" id="sys-fastapi-lat">&lt; 1 ms</span>
+                <span class="stat-note">In-memory loopback dispatch</span>
+              </div>
+            </div>
+
+            <!-- TOPOLOGY DIAGRAM -->
+            <div class="topology-container">
+              <div class="topology-node">
+                <div class="node-icon">💻</div>
+                <div class="node-title">MetaTrader 5 EA</div>
+                <div class="node-detail mono" id="sys-mt5-detail">Status: Checking...</div>
+                <div class="node-tags">
+                  <span class="tag">Timer Network I/O</span>
+                  <span class="tag">Zero WebRequest in OnTick</span>
+                </div>
+              </div>
+              <div class="topology-arrow">➔</div>
+              <div class="topology-node">
+                <div class="node-icon">⚡</div>
+                <div class="node-title">FastAPI Live Bridge</div>
+                <div class="node-detail mono" id="sys-fastapi-detail">Port: 8000 | In-Memory Hub</div>
+                <div class="node-tags">
+                  <span class="tag">Bar 0 Deduplication</span>
+                  <span class="tag">Throttled WS (4/s)</span>
+                </div>
+              </div>
+              <div class="topology-arrow">➔</div>
+              <div class="topology-node">
+                <div class="node-icon">🗄️</div>
+                <div class="node-title">Supabase DB</div>
+                <div class="node-detail mono" id="sys-supabase-detail">Ping: -- ms</div>
+                <div class="node-tags">
+                  <span class="tag">Closed Bars Only</span>
+                  <span class="tag">Zero Ticks Written</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- RECENT EVENTS STREAM (REAL-TIME AUDIT STREAM IN SYSTEM VIEW) -->
+            <div class="table-card" style="margin-top: 1.5rem;">
+              <div class="system-stream-header">
+                <div>
+                  <div class="card-inner-title">RECENT EVENTS STREAM (REALTIME AUDIT)</div>
+                  <span class="section-subtitle">Real-time live audit of network packets, candle ingestion & database commits</span>
+                </div>
+                <div class="system-stream-actions">
+                  <select id="sys-filter-service" class="dark-select">
+                    <option value="ALL">All Services</option>
+                    <option value="MT5">MT5</option>
+                    <option value="FASTAPI">FastAPI</option>
+                    <option value="SUPABASE">Supabase</option>
+                  </select>
+                  <select id="sys-filter-level" class="dark-select">
+                    <option value="ALL">All Levels</option>
+                    <option value="INFO">INFO</option>
+                    <option value="WARNING">WARNING</option>
+                    <option value="ERROR">ERROR</option>
+                  </select>
+                  <button class="btn-stream-action" id="btn-pause-stream" title="Pause stream auto-scroll">⏸️ Pause Stream</button>
+                  <button class="btn-stream-action" id="btn-clear-stream" title="Clear event buffer">🧹 Clear</button>
+                  <span class="stream-buffer-tag mono" id="event-buffer-counter">0 / 500</span>
+                </div>
+              </div>
+              <div class="event-ticker-list" id="system-events-stream">
+                <div class="event-item"><span class="event-time mono">--:--:--</span> <span class="event-msg">Connecting to live WebSocket stream...</span></div>
+              </div>
+            </div>
+
+            <!-- ENVIRONMENT SPECS -->
+            <div class="table-card" style="margin-top: 1.5rem;">
+              <div class="card-inner-title">ENVIRONMENT SPECIFICATIONS</div>
+              <div class="specs-grid">
+                <div class="spec-item"><span class="spec-k">Python Version</span><span class="spec-v mono">Python 3.12 (zoneinfo)</span></div>
+                <div class="spec-item"><span class="spec-k">FastAPI Host</span><span class="spec-v mono">127.0.0.1:8000</span></div>
+                <div class="spec-item"><span class="spec-k">Database Host</span><span class="spec-v mono">aws-0-ap-southeast-1.pooler.supabase.com:5432</span></div>
+                <div class="spec-item"><span class="spec-k">Primary Instrument</span><span class="spec-v mono">XAUUSD.vx</span></div>
+                <div class="spec-item"><span class="spec-k">Execution Mode</span><span class="spec-v mono text-safe">AllowExecution=False (Enforced)</span></div>
+                <div class="spec-item"><span class="spec-k">Lightweight Charts</span><span class="spec-v mono text-accent">v4.2.1 (Bundled Local)</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 5. LOGS VIEW -->
+        <section class="view-panel" id="view-logs">
+          <div class="section-container">
+            <div class="section-header">
+              <div class="header-with-badge">
+                <h2 class="section-title">SYSTEM EVENT AUDIT LOGS</h2>
+                <div class="log-filter-group">
+                  <select id="log-filter-service" class="dark-select">
+                    <option value="ALL">All Services</option>
+                    <option value="MT5">MT5</option>
+                    <option value="FASTAPI">FastAPI</option>
+                    <option value="SUPABASE">Supabase</option>
+                  </select>
+                  <select id="log-filter-level" class="dark-select">
+                    <option value="ALL">All Levels</option>
+                    <option value="INFO">INFO</option>
+                    <option value="WARNING">WARNING</option>
+                    <option value="ERROR">ERROR</option>
+                  </select>
+                </div>
+              </div>
+              <span class="section-subtitle">Real-time system telemetry events and network transaction records</span>
+            </div>
+
+            <div class="table-card">
+              <table class="data-table" id="table-full-logs">
+                <thead>
+                  <tr>
+                    <th style="width: 120px;">TIMESTAMP</th>
+                    <th style="width: 100px;">LEVEL</th>
+                    <th style="width: 120px;">SERVICE</th>
+                    <th>MESSAGE</th>
+                  </tr>
+                </thead>
+                <tbody id="full-logs-tbody">
+                  <tr><td colspan="4" class="loading-cell">Loading system audit logs...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <!-- BOTTOM FOOTER -->
+      <footer class="bottom-footer">
+        <div class="footer-left">
+          <span>Last Dashboard Update: <span class="mono" id="footer-dashboard-update">--:--:--</span></span>
+          <span class="footer-sep">•</span>
+          <span>Last Market Data: <span class="mono" id="footer-market-update">--:--:--</span></span>
+        </div>
+        <div class="footer-right">
+          <span class="auto-refresh-tag"><span class="pulse-dot"></span> WS Live: Active</span>
+          <span class="footer-sep">•</span>
+          <span>Alped Punya V3 &copy; 2026</span>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Pinned Lightweight Charts (Local Bundle, No CDN) -->
+  <script src="lightweight-charts.standalone.production.js"></script>
+  <!-- Application Controller -->
+  <script src="app.js"></script>
+</body>
+</html>
