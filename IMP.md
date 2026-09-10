@@ -1527,3 +1527,20 @@ market_structure_events
 ```
 
 is mathematically deterministic, restart-safe, idempotent, and identical between full-scan and incremental processing.
+
+---
+
+# 14. Verification & Audit Sign-Off (Step 2 Hardening)
+
+- **Step 1 Swing Detection**: 25/25 Pytest Tests PASSED. 0 same-side classification violations across 141 live XAUUSD swings.
+- **Step 2 Market Structure Detection**: 29/29 Pytest Tests PASSED (including strict MSS sequence checks, adversarial matrix, pending continuation target invalidation, and independent oracle reference model).
+- **Persistence Atomicity**: PostgreSQL `conn.transaction()` with snapshot rollback on failure injection.
+- **Mathematical Equivalence**: `FULL REBUILD == INCREMENTAL == PERSISTED SUPABASE` proven on live M1, M5, M15, M30, and H1 data.
+- **Total Automated Test Suite**: 86 passed / 0 failed.
+
+```text
+STATUS:
+STEP 1: COMPLETED & HARDENED
+STEP 2: COMPLETED & HARDENED
+OVERALL STATUS: READY FOR STEP 3
+```

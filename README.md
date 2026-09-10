@@ -94,7 +94,7 @@
 
 ## 3. Running Automated Tests
 
-Run the full automated test suite:
+Run the full automated test suite (86/86 PASSED):
 ```bash
 python -m pytest backend/tests/ -v
 ```
@@ -105,3 +105,16 @@ Verifies:
 - Mathematical bar price sanity & precision rules
 - Account-scoped ticket uniqueness `UNIQUE(source_id, ticket)`
 - MQL5 architecture invariants (Zero WebRequest in `OnInit`, `OnTick`, `OnTradeTransaction`)
+- **Step 1 Swing Detection**: Non-repainting N-bar fractals, same-side swing classification (HH/HL/LH/LL/EQH/EQL), deterministic confirmation epochs, point-tolerance calculation, restart reconstruction.
+- **Step 2 Market Structure Detection Hardening**: BOS, CHoCH, strict MSS sequence checking (`check_bearish_mss_sequence`, `check_bullish_mss_sequence`), continuation target preservation, pending CHoCH closed-candle invalidation, PostgreSQL transactional persistence (`conn.transaction()`), snapshot rollback, failure injection, and independent oracle reference model verification.
+
+---
+
+## 4. Feature Engine Status
+
+| Step | Component | Status | Test Coverage |
+| :--- | :--- | :--- | :--- |
+| **Step 1** | **Swing Detection Engine** | **COMPLETE & HARDENED** | 25/25 Tests PASSED |
+| **Step 2** | **Market Structure Detection** | **COMPLETE & HARDENED** | 29/29 Tests PASSED |
+| **Step 3+** | **FVG, Liquidity & Setups** | **LOCKED (NEXT PHASE)** | Pending Execution |
+
