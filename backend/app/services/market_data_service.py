@@ -9,7 +9,8 @@ from backend.app.features.swing_detector import (
 )
 from backend.app.core.constants import (
     SwingType,
-    CanonicalStructureEventType
+    CanonicalStructureEventType,
+    canonicalize_symbol
 )
 
 from backend.app.repositories.market_structure_repo import market_structure_repo
@@ -210,6 +211,10 @@ class MarketDataService:
         threshold_price = get_break_tolerance_price(symbol, source_id)
 
         events: list[dict] = []
+        step3_history: list[dict] = []
+        processed_keys: set[str] = set()
+
+        sym_canon = canonicalize_symbol(symbol)
 
         for idx, c in enumerate(candles):
             c_epoch = int(c["candle_time_epoch"])
@@ -256,23 +261,112 @@ class MarketDataService:
             elif mss_ev:
                 chosen_ev = mss_ev
 
-            # Step C: Feed into Step 3 Market Structure State Engine
-            step3_state = self._pipe_to_step3(
-                source_id=source_id,
-                symbol=symbol,
-                timeframe=timeframe,
-                c_epoch=c_epoch,
-                bar_index=bar_idx,
-                new_swings=new_swings,
-                chosen_ev=chosen_ev,
-                swings_up_to_c=swings_up_to_c,
-                current_step3_state=step3_state
-            )
+            # Step C: Feed into Step 3 in-memory with deterministic canonical keys
+            for sw in new_swings:
+                cls = sw.get("classification")
+                if cls in [
+                    CanonicalStructureEventType.HH.value,
+                    CanonicalStructureEventType.HL.value,
+                    CanonicalStructureEventType.LH.value,
+                    CanonicalStructureEventType.LL.value
+                ]:
+                    sw_epoch = int(sw.get("swing_candle_time_epoch", c_epoch))
+                    sw_type = sw.get("swing_type", "SW")
+                    ev_key = f"{source_id}:{sym_canon}:{timeframe}:SWING:{cls}:{sw_epoch}:{sw_type}"
+                    is_dup = ev_key in processed_keys
+                    processed_keys.add(ev_key)
 
-        # Persist events and state
+                    canon_ev = CanonicalStructureEvent(
+                        source_id=source_id,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        event_type=CanonicalStructureEventType(cls),
+                        event_time=int(sw.get("confirmed_at_candle_time_epoch", c_epoch)),
+                        event_price=float(sw.get("swing_price", 0.0)),
+                        bar_time=c_epoch,
+                        bar_index=bar_idx,
+                        source_event_id=sw.get("id"),
+                        is_closed_bar=True,
+                        event_key=ev_key,
+                        metadata={"swing_type": sw.get("swing_type"), "swing_candle_time_epoch": sw.get("swing_candle_time_epoch")}
+                    )
+                    step3_state, mutated, _ = market_structure_state_engine.evaluate_structure_event(
+                        step3_state, canon_ev, swings_up_to_c, is_duplicate=is_dup
+                    )
+                    if (mutated or not is_dup) and step3_state.get("state_changed"):
+                        step3_history.append({
+                            "source_id": source_id,
+                            "symbol": sym_canon,
+                            "timeframe": timeframe,
+                            "previous_state": step3_state["previous_state"],
+                            "new_state": step3_state["state"],
+                            "structure": step3_state["structure"],
+                            "last_event": step3_state["last_event"],
+                            "event_time": step3_state["last_event_time"],
+                            "event_price": step3_state["last_event_price"],
+                            "state_reason": step3_state["state_reason"],
+                            "structure_strength": step3_state["structure_strength"],
+                            "source_event_id": step3_state.get("source_event_id"),
+                            "bar_time": step3_state["bar_time"],
+                            "bar_index": step3_state["bar_index"],
+                        })
+
+            if chosen_ev:
+                ev_type_str = chosen_ev.get("event_type")
+                if ev_type_str in CanonicalStructureEventType._value2member_map_:
+                    ev_epoch = int(chosen_ev.get("event_candle_time_epoch", c_epoch))
+                    ev_price = float(chosen_ev.get("broken_level_price", chosen_ev.get("candle_close", 0.0)))
+                    ev_key = f"{source_id}:{sym_canon}:{timeframe}:BREAK:{ev_type_str}:{ev_epoch}:{ev_price:.5f}"
+                    is_dup = ev_key in processed_keys
+                    processed_keys.add(ev_key)
+
+                    canon_ev = CanonicalStructureEvent(
+                        source_id=source_id,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        event_type=CanonicalStructureEventType(ev_type_str),
+                        event_time=ev_epoch,
+                        event_price=float(chosen_ev.get("candle_close", 0.0)),
+                        bar_time=c_epoch,
+                        bar_index=bar_idx,
+                        source_event_id=chosen_ev.get("id"),
+                        is_closed_bar=True,
+                        event_key=ev_key,
+                        metadata=chosen_ev.get("decision_context", {})
+                    )
+                    step3_state, mutated, _ = market_structure_state_engine.evaluate_structure_event(
+                        step3_state, canon_ev, swings_up_to_c, is_duplicate=is_dup
+                    )
+                    if (mutated or not is_dup) and step3_state.get("state_changed"):
+                        step3_history.append({
+                            "source_id": source_id,
+                            "symbol": sym_canon,
+                            "timeframe": timeframe,
+                            "previous_state": step3_state["previous_state"],
+                            "new_state": step3_state["state"],
+                            "structure": step3_state["structure"],
+                            "last_event": step3_state["last_event"],
+                            "event_time": step3_state["last_event_time"],
+                            "event_price": step3_state["last_event_price"],
+                            "state_reason": step3_state["state_reason"],
+                            "structure_strength": step3_state["structure_strength"],
+                            "source_event_id": step3_state.get("source_event_id"),
+                            "bar_time": step3_state["bar_time"],
+                            "bar_index": step3_state["bar_index"],
+                        })
+
+        # Persist Step 2
+        market_structure_repo.clear_structure_for_timeframe(source_id, symbol, timeframe)
         if events:
             market_structure_repo.upsert_structure_events(events)
         market_structure_repo.upsert_structure_state(state)
+
+        # Batch persist Step 3 atomically in 1 transaction
+        market_structure_state_repo.batch_save_rebuild_state(
+            final_state=step3_state,
+            history_entries=step3_history,
+            processed_event_keys=list(processed_keys)
+        )
 
         logger.info(f"[MarketDataService] Full rebuild generated {len(events)} structure events for {symbol} ({timeframe})")
         return len(events)
@@ -294,9 +388,10 @@ class MarketDataService:
         into Step 3 Market Structure State Engine in strict chronological priority:
         1. Confirmed Swings (HH, HL, LH, LL)
         2. Break/Shift Events (CHOCH, MSS, BOS, DOUBLE_BREAK)
-        Persists state and history atomically.
+        Persists state and history atomically for live incremental transitions.
         """
         st3 = dict(current_step3_state)
+        sym_canon = canonicalize_symbol(symbol)
 
         # 1. Process confirmed swings
         for sw in new_swings:
@@ -307,8 +402,9 @@ class MarketDataService:
                 CanonicalStructureEventType.LH.value,
                 CanonicalStructureEventType.LL.value
             ]:
-                sw_id = sw.get("id", sw.get("swing_candle_time_epoch"))
-                ev_key = f"{source_id}:{symbol}:{timeframe}:{cls}:{c_epoch}:{sw_id}"
+                sw_epoch = int(sw.get("swing_candle_time_epoch", c_epoch))
+                sw_type = sw.get("swing_type", "SW")
+                ev_key = f"{source_id}:{sym_canon}:{timeframe}:SWING:{cls}:{sw_epoch}:{sw_type}"
                 is_dup = market_structure_state_repo.is_event_processed(source_id, symbol, timeframe, ev_key)
                 canon_ev = CanonicalStructureEvent(
                     source_id=source_id,
@@ -334,15 +430,16 @@ class MarketDataService:
         if chosen_ev:
             ev_type_str = chosen_ev.get("event_type")
             if ev_type_str in CanonicalStructureEventType._value2member_map_:
-                ev_id = chosen_ev.get("id", "ev")
-                ev_key = f"{source_id}:{symbol}:{timeframe}:{ev_type_str}:{c_epoch}:{ev_id}"
+                ev_epoch = int(chosen_ev.get("event_candle_time_epoch", c_epoch))
+                ev_price = float(chosen_ev.get("broken_level_price", chosen_ev.get("candle_close", 0.0)))
+                ev_key = f"{source_id}:{sym_canon}:{timeframe}:BREAK:{ev_type_str}:{ev_epoch}:{ev_price:.5f}"
                 is_dup = market_structure_state_repo.is_event_processed(source_id, symbol, timeframe, ev_key)
                 canon_ev = CanonicalStructureEvent(
                     source_id=source_id,
                     symbol=symbol,
                     timeframe=timeframe,
                     event_type=CanonicalStructureEventType(ev_type_str),
-                    event_time=int(chosen_ev.get("event_candle_time_epoch", c_epoch)),
+                    event_time=ev_epoch,
                     event_price=float(chosen_ev.get("candle_close", 0.0)),
                     bar_time=c_epoch,
                     bar_index=bar_index,

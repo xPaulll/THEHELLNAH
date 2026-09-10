@@ -269,6 +269,154 @@ class MarketStructureStateRepository:
 
         return True
 
+    def batch_save_rebuild_state(
+        self,
+        final_state: dict,
+        history_entries: list[dict],
+        processed_event_keys: list[str]
+    ) -> bool:
+        """
+        Atomically replaces market structure state during a Full Rebuild:
+        1. Updates in-memory stores for clean test isolation.
+        2. In 1 single PostgreSQL transaction:
+           - Deletes previous history and processed events for (source_id, symbol, timeframe).
+           - Upserts final_state into market_structure_state_current.
+           - Batch-inserts history_entries using executemany into market_structure_state_history.
+           - Batch-inserts processed_event_keys using executemany into market_structure_state_events_processed.
+        """
+        sym_canon = canonicalize_symbol(final_state["symbol"])
+        source_id = final_state["source_id"]
+        timeframe = final_state["timeframe"]
+
+        state_copy = dict(final_state)
+        state_copy["symbol"] = sym_canon
+
+        # 1. Update in-memory stores
+        global _memory_current_state, _memory_state_history, _memory_processed_events
+        curr_key = (source_id, sym_canon, timeframe)
+        _memory_current_state[curr_key] = state_copy
+
+        # Purge existing history & processed keys for this dataset in memory
+        _memory_state_history = [
+            h for h in _memory_state_history
+            if not (h["source_id"] == source_id and h["symbol"] == sym_canon and h["timeframe"] == timeframe)
+        ]
+        _memory_state_history.extend(history_entries)
+
+        _memory_processed_events = {
+            k for k in _memory_processed_events
+            if not (k[0] == source_id and k[1] == sym_canon and k[2] == timeframe)
+        }
+        for k in processed_event_keys:
+            _memory_processed_events.add((source_id, sym_canon, timeframe, k))
+
+        # 2. Direct PostgreSQL transaction
+        conn = get_postgres_connection()
+        if conn:
+            try:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        # Clear old history and processed events for clean replacement
+                        cur.execute("""
+                            DELETE FROM market_structure_state_history
+                            WHERE source_id = %s AND UPPER(symbol) = %s AND timeframe = %s;
+                        """, (source_id, sym_canon, timeframe))
+                        cur.execute("""
+                            DELETE FROM market_structure_state_events_processed
+                            WHERE source_id = %s AND UPPER(symbol) = %s AND timeframe = %s;
+                        """, (source_id, sym_canon, timeframe))
+
+                        # Upsert current state
+                        cur.execute("""
+                            INSERT INTO market_structure_state_current (
+                                source_id, symbol, timeframe, state, previous_state,
+                                structure, last_event, last_event_time, last_event_price,
+                                state_changed, state_reason, structure_strength, source_event_id,
+                                bar_time, bar_index, updated_at
+                            ) VALUES (
+                                %(source_id)s, %(symbol)s, %(timeframe)s, %(state)s, %(previous_state)s,
+                                %(structure)s, %(last_event)s, %(last_event_time)s, %(last_event_price)s,
+                                %(state_changed)s, %(state_reason)s, %(structure_strength)s, %(source_event_id)s,
+                                %(bar_time)s, %(bar_index)s, now()
+                            )
+                            ON CONFLICT (source_id, symbol, timeframe)
+                            DO UPDATE SET
+                                state = EXCLUDED.state,
+                                previous_state = EXCLUDED.previous_state,
+                                structure = EXCLUDED.structure,
+                                last_event = EXCLUDED.last_event,
+                                last_event_time = EXCLUDED.last_event_time,
+                                last_event_price = EXCLUDED.last_event_price,
+                                state_changed = EXCLUDED.state_changed,
+                                state_reason = EXCLUDED.state_reason,
+                                structure_strength = EXCLUDED.structure_strength,
+                                source_event_id = EXCLUDED.source_event_id,
+                                bar_time = EXCLUDED.bar_time,
+                                bar_index = EXCLUDED.bar_index,
+                                updated_at = now();
+                        """, state_copy)
+
+                        # Batch insert history
+                        if history_entries:
+                            cur.executemany("""
+                                INSERT INTO market_structure_state_history (
+                                    source_id, symbol, timeframe, previous_state, new_state,
+                                    structure, last_event, event_time, event_price,
+                                    state_reason, structure_strength, source_event_id,
+                                    bar_time, bar_index
+                                ) VALUES (
+                                    %(source_id)s, %(symbol)s, %(timeframe)s, %(previous_state)s, %(new_state)s,
+                                    %(structure)s, %(last_event)s, %(event_time)s, %(event_price)s,
+                                    %(state_reason)s, %(structure_strength)s, %(source_event_id)s,
+                                    %(bar_time)s, %(bar_index)s
+                                )
+                                ON CONFLICT (source_id, symbol, timeframe, bar_time, new_state)
+                                DO NOTHING;
+                            """, history_entries)
+
+                        # Batch insert processed events
+                        if processed_event_keys:
+                            key_tuples = [(source_id, sym_canon, timeframe, k) for k in processed_event_keys]
+                            cur.executemany("""
+                                INSERT INTO market_structure_state_events_processed (
+                                    source_id, symbol, timeframe, event_key
+                                ) VALUES (%s, %s, %s, %s)
+                                ON CONFLICT (source_id, symbol, timeframe, event_key)
+                                DO NOTHING;
+                            """, key_tuples)
+
+                conn.close()
+                return True
+            except Exception as ex:
+                logger.error(f"[MarketStructureStateRepo] Error in batch rebuild state persistence: {ex}")
+                if conn:
+                    conn.close()
+                return False
+
+        # Fallback Supabase REST
+        client = get_supabase_client()
+        if client:
+            try:
+                client.table("market_structure_state_current").upsert(state_copy).execute()
+                if history_entries:
+                    client.table("market_structure_state_history").insert(history_entries).execute()
+                if processed_event_keys:
+                    records = [
+                        {
+                            "source_id": source_id,
+                            "symbol": sym_canon,
+                            "timeframe": timeframe,
+                            "event_key": k
+                        }
+                        for k in processed_event_keys
+                    ]
+                    client.table("market_structure_state_events_processed").upsert(records).execute()
+                return True
+            except Exception as ex:
+                logger.error(f"[MarketStructureStateRepo] Supabase error in batch rebuild persistence: {ex}")
+
+        return True
+
     def get_state_history(
         self,
         source_id: str,
