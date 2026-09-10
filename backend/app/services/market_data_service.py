@@ -7,7 +7,10 @@ from backend.app.features.swing_detector import (
     get_symbol_point,
     get_symbol_tolerance_points
 )
-from backend.app.core.constants import SwingType
+from backend.app.core.constants import (
+    SwingType,
+    CanonicalStructureEventType
+)
 
 from backend.app.repositories.market_structure_repo import market_structure_repo
 from backend.app.features.market_structure_detector import (
@@ -15,6 +18,13 @@ from backend.app.features.market_structure_detector import (
     get_break_tolerance_price,
     create_initial_state
 )
+
+from backend.app.models.market_structure_state_models import CanonicalStructureEvent
+from backend.app.features.market_structure_state_engine import (
+    market_structure_state_engine,
+    create_initial_market_state
+)
+from backend.app.repositories.market_structure_state_repo import market_structure_state_repo
 
 logger = logging.getLogger(__name__)
 
@@ -193,14 +203,17 @@ class MarketDataService:
 
         # Clear stale structure events and state for this dataset before full rebuild
         market_structure_repo.clear_structure_for_timeframe(source_id, symbol, timeframe)
+        market_structure_state_repo.clear_state_for_timeframe(source_id, symbol, timeframe)
 
         state = create_initial_state(source_id, symbol, timeframe)
+        step3_state = create_initial_market_state(source_id, symbol, timeframe)
         threshold_price = get_break_tolerance_price(symbol, source_id)
 
         events: list[dict] = []
 
-        for c in candles:
+        for idx, c in enumerate(candles):
             c_epoch = int(c["candle_time_epoch"])
+            bar_idx = idx + 1
 
             # Find newly confirmed swings available at this candle:
             # confirmed_at > last_processed_confirmation_time AND confirmed_at <= c_epoch
@@ -232,10 +245,29 @@ class MarketDataService:
                 threshold_price=threshold_price,
                 fractal_n=fractal_n
             )
+            chosen_ev = None
             if candle_ev:
                 # Priority: If MSS was confirmed on this exact candle, MSS takes priority over CHOCH/BOS
                 if not mss_ev:
                     events.append(candle_ev)
+                    chosen_ev = candle_ev
+                else:
+                    chosen_ev = mss_ev
+            elif mss_ev:
+                chosen_ev = mss_ev
+
+            # Step C: Feed into Step 3 Market Structure State Engine
+            step3_state = self._pipe_to_step3(
+                source_id=source_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                c_epoch=c_epoch,
+                bar_index=bar_idx,
+                new_swings=new_swings,
+                chosen_ev=chosen_ev,
+                swings_up_to_c=swings_up_to_c,
+                current_step3_state=step3_state
+            )
 
         # Persist events and state
         if events:
@@ -245,6 +277,88 @@ class MarketDataService:
         logger.info(f"[MarketDataService] Full rebuild generated {len(events)} structure events for {symbol} ({timeframe})")
         return len(events)
 
+    def _pipe_to_step3(
+        self,
+        source_id: str,
+        symbol: str,
+        timeframe: str,
+        c_epoch: int,
+        bar_index: int,
+        new_swings: list[dict],
+        chosen_ev: Optional[dict],
+        swings_up_to_c: list[dict],
+        current_step3_state: dict
+    ) -> dict:
+        """
+        Feeds newly available Step 1 swings and Step 2 structural events
+        into Step 3 Market Structure State Engine in strict chronological priority:
+        1. Confirmed Swings (HH, HL, LH, LL)
+        2. Break/Shift Events (CHOCH, MSS, BOS, DOUBLE_BREAK)
+        Persists state and history atomically.
+        """
+        st3 = dict(current_step3_state)
+
+        # 1. Process confirmed swings
+        for sw in new_swings:
+            cls = sw.get("classification")
+            if cls in [
+                CanonicalStructureEventType.HH.value,
+                CanonicalStructureEventType.HL.value,
+                CanonicalStructureEventType.LH.value,
+                CanonicalStructureEventType.LL.value
+            ]:
+                sw_id = sw.get("id", sw.get("swing_candle_time_epoch"))
+                ev_key = f"{source_id}:{symbol}:{timeframe}:{cls}:{c_epoch}:{sw_id}"
+                is_dup = market_structure_state_repo.is_event_processed(source_id, symbol, timeframe, ev_key)
+                canon_ev = CanonicalStructureEvent(
+                    source_id=source_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    event_type=CanonicalStructureEventType(cls),
+                    event_time=int(sw.get("confirmed_at_candle_time_epoch", c_epoch)),
+                    event_price=float(sw.get("swing_price", 0.0)),
+                    bar_time=c_epoch,
+                    bar_index=bar_index,
+                    source_event_id=sw.get("id"),
+                    is_closed_bar=True,
+                    event_key=ev_key,
+                    metadata={"swing_type": sw.get("swing_type"), "swing_candle_time_epoch": sw.get("swing_candle_time_epoch")}
+                )
+                st3, mutated, _ = market_structure_state_engine.evaluate_structure_event(
+                    st3, canon_ev, swings_up_to_c, is_duplicate=is_dup
+                )
+                if mutated or not is_dup:
+                    market_structure_state_repo.save_state_and_history_if_changed(st3, event_key=ev_key)
+
+        # 2. Process Step 2 structural break/shift events
+        if chosen_ev:
+            ev_type_str = chosen_ev.get("event_type")
+            if ev_type_str in CanonicalStructureEventType._value2member_map_:
+                ev_id = chosen_ev.get("id", "ev")
+                ev_key = f"{source_id}:{symbol}:{timeframe}:{ev_type_str}:{c_epoch}:{ev_id}"
+                is_dup = market_structure_state_repo.is_event_processed(source_id, symbol, timeframe, ev_key)
+                canon_ev = CanonicalStructureEvent(
+                    source_id=source_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    event_type=CanonicalStructureEventType(ev_type_str),
+                    event_time=int(chosen_ev.get("event_candle_time_epoch", c_epoch)),
+                    event_price=float(chosen_ev.get("candle_close", 0.0)),
+                    bar_time=c_epoch,
+                    bar_index=bar_index,
+                    source_event_id=chosen_ev.get("id"),
+                    is_closed_bar=True,
+                    event_key=ev_key,
+                    metadata=chosen_ev.get("decision_context", {})
+                )
+                st3, mutated, _ = market_structure_state_engine.evaluate_structure_event(
+                    st3, canon_ev, swings_up_to_c, is_duplicate=is_dup
+                )
+                if mutated or not is_dup:
+                    market_structure_state_repo.save_state_and_history_if_changed(st3, event_key=ev_key)
+
+        return st3
+
     def process_live_market_structure(
         self,
         source_id: str,
@@ -253,21 +367,16 @@ class MarketDataService:
         fractal_n: int = 2
     ) -> list[dict]:
         """
-        Mode B: Incremental Market Structure Processing (Step 2).
+        Mode B: Incremental Market Structure Processing (Step 2 + Step 3).
         Called when a single new live candle closes.
-        1. Loads current persisted state from DB (or creates initial state).
-        2. Retrieves newly closed candles with epoch > last_processed_candle_time_epoch.
-        3. For each new candle:
-           - Retrieves newly confirmed swings:
-             confirmed_at > last_processed_confirmation_time AND confirmed_at <= c_epoch.
-           - Applies swings to state (MSS detection, bootstrap, invalidation).
-           - Evaluates candle close (DOUBLE_BREAK, CHOCH, BOS).
-           - Persists any emitted event and updates state atomically.
-        Returns list of newly emitted events.
         """
         state = market_structure_repo.get_structure_state(source_id, symbol, timeframe)
         if not state:
             state = create_initial_state(source_id, symbol, timeframe)
+
+        step3_state = market_structure_state_repo.get_current_state(source_id, symbol, timeframe)
+        if not step3_state:
+            step3_state = create_initial_market_state(source_id, symbol, timeframe)
 
         last_c_epoch = int(state.get("last_processed_candle_time_epoch", 0))
         recent_candles = candle_repo.get_recent_candles_ascending(
@@ -293,8 +402,9 @@ class MarketDataService:
 
         emitted_events: list[dict] = []
 
-        for c in new_candles:
+        for idx, c in enumerate(new_candles):
             c_epoch = int(c["candle_time_epoch"])
+            bar_idx = idx + 1
 
             new_swings = swing_repo.get_newly_confirmed_swings(
                 source_id=source_id,
@@ -326,12 +436,30 @@ class MarketDataService:
                 threshold_price=threshold_price,
                 fractal_n=fractal_n
             )
+            chosen_ev = None
             if candle_ev and not mss_ev:
                 emitted_events.append(candle_ev)
                 market_structure_repo.save_event_and_state(candle_ev, state)
+                chosen_ev = candle_ev
+            elif mss_ev:
+                chosen_ev = mss_ev
             elif not mss_ev:
                 market_structure_repo.upsert_structure_state(state)
 
+            # Step C: Pipe into Step 3
+            step3_state = self._pipe_to_step3(
+                source_id=source_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                c_epoch=c_epoch,
+                bar_index=bar_idx,
+                new_swings=new_swings,
+                chosen_ev=chosen_ev,
+                swings_up_to_c=swings_up_to_c,
+                current_step3_state=step3_state
+            )
+
         return emitted_events
+
 
 market_data_service = MarketDataService()

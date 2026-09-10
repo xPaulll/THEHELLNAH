@@ -8,6 +8,7 @@ from backend.app.api.v1.endpoints.health import router as health_router
 from backend.app.api.v1.endpoints.dashboard import router as dashboard_router
 from backend.app.api.v1.endpoints.swings import router as swings_router
 from backend.app.api.v1.endpoints.market_structure import router as market_structure_router
+from backend.app.api.v1.endpoints.market_structure_state_router import router as market_structure_state_router
 
 api_v1_router = APIRouter(prefix="/api/v1")
 
@@ -20,3 +21,4 @@ api_v1_router.include_router(health_router)
 api_v1_router.include_router(dashboard_router)
 api_v1_router.include_router(swings_router)
 api_v1_router.include_router(market_structure_router)
+api_v1_router.include_router(market_structure_state_router)

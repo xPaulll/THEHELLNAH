@@ -111,3 +111,42 @@ def canonicalize_symbol(symbol: str) -> str:
     """Canonical uppercase format for instruments (e.g. XAUUSD.vx -> XAUUSD.VX)"""
     return symbol.strip().upper()
 
+
+# ============================================================================
+# FEATURE ENGINE STEP 3 — MARKET STRUCTURE STATE ENGINE ENUMS
+# ============================================================================
+
+class MarketState(str, Enum):
+    UNKNOWN = "UNKNOWN"
+    NEUTRAL = "NEUTRAL"
+    BULLISH = "BULLISH"
+    BEARISH = "BEARISH"
+    TRANSITION = "TRANSITION"
+
+
+class StructureStrength(str, Enum):
+    INSUFFICIENT = "INSUFFICIENT"
+    DEVELOPING = "DEVELOPING"
+    CONFIRMED = "CONFIRMED"
+
+
+class StructureConfiguration(str, Enum):
+    HH_HL = "HH_HL"
+    LH_LL = "LH_LL"
+    MIXED = "MIXED"
+    NONE = "NONE"
+
+
+class CanonicalStructureEventType(str, Enum):
+    HH = "HH"
+    HL = "HL"
+    LH = "LH"
+    LL = "LL"
+    BOS_BULLISH = "BOS_BULLISH"
+    BOS_BEARISH = "BOS_BEARISH"
+    CHOCH_BULLISH = "CHOCH_BULLISH"
+    CHOCH_BEARISH = "CHOCH_BEARISH"
+    MSS_BULLISH = "MSS_BULLISH"
+    MSS_BEARISH = "MSS_BEARISH"
+    DOUBLE_BREAK = "DOUBLE_BREAK"
+
