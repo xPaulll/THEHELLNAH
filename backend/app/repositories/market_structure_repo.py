@@ -141,7 +141,8 @@ class MarketStructureRepository:
                                 ON CONFLICT (source_id, symbol, timeframe, event_candle_time_epoch, event_type)
                                 DO UPDATE SET
                                     candle_close = EXCLUDED.candle_close,
-                                    decision_context = EXCLUDED.decision_context;
+                                    decision_context = EXCLUDED.decision_context
+                                RETURNING id;
                             """, {
                                 "source_id": ev["source_id"],
                                 "symbol": sym_canon,
@@ -163,6 +164,9 @@ class MarketStructureRepository:
                                 "fractal_n": ev.get("fractal_n", 2),
                                 "decision_context": Jsonb(ev.get("decision_context", {}))
                             })
+                            row = cur.fetchone()
+                            if row:
+                                ev["id"] = row[0]
                 conn.close()
                 return len(events)
             except Exception as ex:
@@ -333,6 +337,7 @@ class MarketStructureRepository:
                             row = cur.fetchone()
                             if row:
                                 event_id = row[0]
+                                event["id"] = event_id
                                 if not state.get("pending_choch_event_id") and event["event_type"] in ("CHOCH_BULLISH", "CHOCH_BEARISH"):
                                     state["pending_choch_event_id"] = event_id
 

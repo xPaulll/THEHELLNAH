@@ -547,3 +547,35 @@ def test_21_api_endpoint_market_structure_state():
     assert data_hist["status"] == "SUCCESS"
     assert data_hist["total"] == 1
     assert data_hist["history"][0]["new_state"] == "BULLISH"
+
+
+def test_22_source_event_id_persistence_and_propagation():
+    """22. Identity Invariant: source_event_id is never NULL when source event possesses canonical ID."""
+    state = create_initial_market_state(SOURCE_ID, "XAUUSD", "M5")
+    state["state"] = MarketState.BEARISH.value
+
+    # Simulate Step 2 CHOCH break event carrying canonical DB ID 2850
+    ev = make_event(
+        event_type=CanonicalStructureEventType.CHOCH_BULLISH,
+        bar_time=1789017000,
+        bar_index=15,
+        price=4418.80,
+        timeframe="M5",
+        source_event_id=2850
+    )
+
+    new_st, mutated, _ = market_structure_state_engine.evaluate_structure_event(state, ev)
+    assert mutated is True
+    assert new_st["state"] == MarketState.TRANSITION.value
+    assert new_st["source_event_id"] == 2850
+
+    # Persist and verify in memory / DB
+    market_structure_state_repo.save_state_and_history_if_changed(new_st, event_key=ev.event_key)
+    current = market_structure_state_repo.get_current_state(SOURCE_ID, "XAUUSD", "M5")
+    assert current is not None
+    assert current["source_event_id"] == 2850
+
+    history = market_structure_state_repo.get_state_history(SOURCE_ID, "XAUUSD", "M5")
+    assert len(history) == 1
+    assert history[0]["source_event_id"] == 2850
+

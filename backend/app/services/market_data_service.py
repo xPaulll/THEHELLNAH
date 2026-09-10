@@ -361,6 +361,22 @@ class MarketDataService:
             market_structure_repo.upsert_structure_events(events)
         market_structure_repo.upsert_structure_state(state)
 
+        # Build Step 2 event ID lookup: (event_candle_time_epoch, event_type) -> id
+        step2_id_map = {
+            (int(ev["event_candle_time_epoch"]), ev["event_type"]): ev.get("id")
+            for ev in events
+            if ev.get("id") is not None
+        }
+
+        # Backfill source_event_id for Step 2 break events in history
+        for h in step3_history:
+            if h.get("source_event_id") is None and h.get("last_event") and h.get("event_time"):
+                h["source_event_id"] = step2_id_map.get((int(h["event_time"]), h["last_event"]))
+
+        # Backfill source_event_id in final state
+        if step3_state.get("source_event_id") is None and step3_state.get("last_event") and step3_state.get("last_event_time"):
+            step3_state["source_event_id"] = step2_id_map.get((int(step3_state["last_event_time"]), step3_state["last_event"]))
+
         # Batch persist Step 3 atomically in 1 transaction
         market_structure_state_repo.batch_save_rebuild_state(
             final_state=step3_state,
