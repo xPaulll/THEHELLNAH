@@ -87,6 +87,34 @@ class SyncOrchestrator:
         # 4. Idempotent Upsert
         inserted_count = candle_repo.upsert_candles(prepared_rows)
 
+        # 5. Feature Engine: Step 1 (Swings) and Step 2 (Market Structure) Integration
+        try:
+            from backend.app.services.market_data_service import market_data_service
+            if payload.sync_type in (SyncType.INITIAL_SYNC, SyncType.RECOVERY_SYNC, SyncType.GAP_BACKFILL):
+                market_data_service.recalculate_swings_full(
+                    source_id=source_id,
+                    symbol=symbol,
+                    timeframe=timeframe_str
+                )
+                market_data_service.recalculate_market_structure_full(
+                    source_id=source_id,
+                    symbol=symbol,
+                    timeframe=timeframe_str
+                )
+            elif payload.sync_type == SyncType.LIVE_SYNC:
+                market_data_service.process_live_candle_swing(
+                    source_id=source_id,
+                    symbol=symbol,
+                    timeframe=timeframe_str
+                )
+                market_data_service.process_live_market_structure(
+                    source_id=source_id,
+                    symbol=symbol,
+                    timeframe=timeframe_str
+                )
+        except Exception as e:
+            logger.error(f"[SyncOrchestrator] Feature Engine structure processing error: {e}")
+
         return {
             "status": "SUCCESS",
             "source_id": source_id,

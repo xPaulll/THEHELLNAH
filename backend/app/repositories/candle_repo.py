@@ -56,6 +56,74 @@ class CandleRepository:
             return None
         return max(matching, key=lambda x: x["candle_time_epoch"])
 
+    def get_candles_ascending(
+        self,
+        source_id: str,
+        symbol: str,
+        timeframe: str,
+        limit: int = 1000
+    ) -> list[dict]:
+        """
+        Retrieves closed candles sorted chronologically ASCENDING.
+        Case-insensitive symbol matching.
+        """
+        client = get_supabase_client()
+        if client:
+            try:
+                res = client.table("market_candles").select("*")\
+                    .eq("source_id", source_id)\
+                    .ilike("symbol", symbol)\
+                    .eq("timeframe", timeframe)\
+                    .order("candle_time_utc", desc=False)\
+                    .limit(limit)\
+                    .execute()
+                if res.data:
+                    return res.data
+            except Exception as e:
+                logger.error(f"[CandleRepo] Supabase get_candles_ascending error: {e}")
+
+        # In-memory fallback (unit test isolation)
+        matching = [
+            c for (s_id, sym, tf, _), c in _memory_candles.items()
+            if s_id == source_id and sym.upper() == symbol.upper() and tf.upper() == timeframe.upper()
+        ]
+        matching.sort(key=lambda x: x["candle_time_epoch"])
+        return matching[:limit]
+
+    def get_recent_candles_ascending(
+        self,
+        source_id: str,
+        symbol: str,
+        timeframe: str,
+        limit: int = 50
+    ) -> list[dict]:
+        """
+        Retrieves the most recent `limit` closed candles, sorted ASCENDING.
+        Case-insensitive symbol matching.
+        """
+        client = get_supabase_client()
+        if client:
+            try:
+                res = client.table("market_candles").select("*")\
+                    .eq("source_id", source_id)\
+                    .ilike("symbol", symbol)\
+                    .eq("timeframe", timeframe)\
+                    .order("candle_time_utc", desc=True)\
+                    .limit(limit)\
+                    .execute()
+                if res.data:
+                    return sorted(res.data, key=lambda x: x["candle_time_epoch"])
+            except Exception as e:
+                logger.error(f"[CandleRepo] Supabase get_recent_candles_ascending error: {e}")
+
+        # In-memory fallback
+        matching = [
+            c for (s_id, sym, tf, _), c in _memory_candles.items()
+            if s_id == source_id and sym.upper() == symbol.upper() and tf.upper() == timeframe.upper()
+        ]
+        matching.sort(key=lambda x: x["candle_time_epoch"])
+        return matching[-limit:] if len(matching) > limit else matching
+
     def record_gaps(self, gaps: list[dict]) -> int:
         if not gaps:
             return 0

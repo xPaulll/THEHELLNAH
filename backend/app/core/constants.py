@@ -61,3 +61,53 @@ class TickMode(str, Enum):
     TICK_OFF = "TICK_OFF"
     TICK_SAMPLE = "TICK_SAMPLE"
     TICK_FULL = "TICK_FULL"
+
+class SwingType(str, Enum):
+    HIGH = "HIGH"
+    LOW = "LOW"
+
+class SwingClassification(str, Enum):
+    HH = "HH"
+    HL = "HL"
+    LH = "LH"
+    LL = "LL"
+    EQH = "EQH"
+    EQL = "EQL"
+
+DEFAULT_EQUAL_TOLERANCE_POINTS: dict[str, float] = {
+    "XAUUSD": 10.0,  # 10 points (e.g. 10 * 0.01 = $0.10)
+    "EURUSD": 30.0,  # 30 points (e.g. 30 * 0.00001 = 0.00030 = 3 pips)
+    "GBPUSD": 30.0,  # 30 points (e.g. 30 * 0.00001 = 0.00030 = 3 pips)
+    "DEFAULT": 10.0
+}
+
+class StructureBias(str, Enum):
+    NEUTRAL = "NEUTRAL"
+    BULLISH = "BULLISH"
+    BEARISH = "BEARISH"
+
+class StructureTransitionState(str, Enum):
+    NORMAL = "NORMAL"
+    CHOCH_BEARISH_PENDING = "CHOCH_BEARISH_PENDING"
+    CHOCH_BULLISH_PENDING = "CHOCH_BULLISH_PENDING"
+
+class StructureEventType(str, Enum):
+    BOS_BULLISH = "BOS_BULLISH"
+    BOS_BEARISH = "BOS_BEARISH"
+    CHOCH_BULLISH = "CHOCH_BULLISH"
+    CHOCH_BEARISH = "CHOCH_BEARISH"
+    MSS_BULLISH = "MSS_BULLISH"
+    MSS_BEARISH = "MSS_BEARISH"
+    DOUBLE_BREAK = "DOUBLE_BREAK"
+
+STRUCTURE_BREAK_TOLERANCE_POINTS: dict[str, float] = {
+    "XAUUSD": 0.0,
+    "EURUSD": 0.0,
+    "GBPUSD": 0.0,
+    "DEFAULT": 0.0
+}
+
+def canonicalize_symbol(symbol: str) -> str:
+    """Canonical uppercase format for instruments (e.g. XAUUSD.vx -> XAUUSD.VX)"""
+    return symbol.strip().upper()
+

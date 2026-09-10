@@ -363,7 +363,36 @@ def get_dashboard_candles(
     """
     db_conn = get_postgres_connection()
     if not db_conn:
-        return {"status": "ERROR", "message": "Database unavailable", "candles": []}
+        from backend.app.repositories.candle_repo import _memory_candles
+        mem_candles = []
+        sym_clean = symbol.split(".")[0].upper()
+        for (_, sym, tf, _), c in _memory_candles.items():
+            if sym_clean in sym.upper() and tf.upper() == timeframe.upper():
+                c_epoch = c.get("candle_time_epoch", 0)
+                mem_candles.append({
+                    "id": c.get("id", 0),
+                    "timeframe": tf,
+                    "epoch": c_epoch,
+                    "candle_time_utc": c.get("candle_time_utc"),
+                    "candle_time_display": str(c.get("candle_time_utc", "")),
+                    "candle_time_wib": str(c.get("broker_time", "")),
+                    "open": float(c["open"]),
+                    "high": float(c["high"]),
+                    "low": float(c["low"]),
+                    "close": float(c["close"]),
+                    "volume": c.get("tick_volume", 0),
+                    "spread": c.get("spread", 0),
+                    "session": c.get("session", "N/A"),
+                    "is_gap_recovered": c.get("is_gap_recovered", False)
+                })
+        mem_candles.sort(key=lambda x: x["epoch"], reverse=True)
+        return {
+            "status": "SUCCESS",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "total_returned": len(mem_candles[:limit]),
+            "candles": mem_candles[:limit]
+        }
 
     candles = []
     try:
