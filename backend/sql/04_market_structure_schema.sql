@@ -90,8 +90,9 @@ CREATE TABLE IF NOT EXISTS market_structure_state (
     last_broken_low_candle_time_epoch BIGINT,
 
     -- Active CHoCH tracking for MSS confirmation
-    pending_choch_event_id BIGINT,
+    pending_choch_event_id BIGINT REFERENCES market_structure_events(id) ON DELETE SET NULL,
     pending_choch_epoch BIGINT,
+    pending_choch_continuation_target_price NUMERIC(16, 6),
 
     updated_at TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (source_id, symbol, timeframe)

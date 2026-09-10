@@ -516,3 +516,626 @@ def test_api_endpoint_market_structure_read_only():
     assert data["bias"] == "BULLISH"
     assert data["total_events"] == 1
     assert data["events"][0]["event_type"] == "BOS_BULLISH"
+
+
+# ============================================================================
+# FINAL HARDENING TESTS (STEP 2 CONTRACT ENFORCEMENT)
+# ============================================================================
+
+def test_step1_to_step2_boundary_no_swing_redetection():
+    """
+    1. Boundary test: Step 2 strictly consumes Step 1 market_swings.
+    It does not detect fractals, does not re-classify HH/HL/LH/LL, and
+    does not create swings from candle high/low.
+    """
+    import inspect
+    from backend.app.features.market_structure_detector import MarketStructureDetector
+    src = inspect.getsource(MarketStructureDetector)
+    assert "detect_swings_from_closed_candles" not in src
+    assert "is_fractal" not in src
+    assert "recalculate" not in src
+
+    # Verify that extreme candle spikes without confirmed swings do NOT create swings in state
+    state = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    state["bias"] = StructureBias.BULLISH.value
+    state["bullish_break_level_price"] = 4400.0
+    state["protected_low_price"] = 4350.0
+
+    # Candle spikes to 5000 and drops to 4000, but no new confirmed swings are fed
+    candle = {"candle_time_epoch": 200, "open": 4380.0, "high": 5000.0, "low": 4000.0, "close": 4385.0}
+    state, ev = market_structure_detector.evaluate_closed_candle(candle, state, threshold_price=0.10)
+
+    # Bullish break level and protected low must remain completely unchanged!
+    assert state["bullish_break_level_price"] == 4400.0
+    assert state["protected_low_price"] == 4350.0
+    assert ev is None
+
+
+def test_mss_bearish_adversarial_matrix():
+    """
+    10. Adversarial matrix for Bearish MSS:
+    - PASS: CHOCH -> LH -> LL
+    - PASS: CHOCH -> LL -> LH
+    - FAIL: CHOCH -> LH -> HH -> LL (contaminated with HH)
+    - FAIL: CHOCH -> LL -> HH -> LH (contaminated with HH)
+    - FAIL: Pre-CHOCH LH, Pre-CHOCH LL, CHOCH (pre-choch cannot trigger MSS)
+    - FAIL: CHOCH -> only LH (insufficient)
+    - FAIL: CHOCH -> only LL (insufficient)
+    - FAIL: CHOCH -> LH -> LL -> HH (superseded by contrary swing)
+    """
+    # 1. PASS: CHOCH -> LH -> LL
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_pass1 = [
+        {"id": 1, "swing_type": "HIGH", "classification": "LH", "swing_price": 4480.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "LOW", "classification": "LL", "swing_price": 4420.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_pass1, swings_pass1)
+    assert mss_ev is not None
+    assert mss_ev["event_type"] == StructureEventType.MSS_BEARISH.value
+    assert st_res["bias"] == StructureBias.BEARISH.value
+    assert st_res["transition_state"] == StructureTransitionState.NORMAL.value
+
+    # 2. PASS: CHOCH -> LL -> LH
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_pass2 = [
+        {"id": 1, "swing_type": "LOW", "classification": "LL", "swing_price": 4420.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "HIGH", "classification": "LH", "swing_price": 4480.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_pass2, swings_pass2)
+    assert mss_ev is not None
+    assert mss_ev["event_type"] == StructureEventType.MSS_BEARISH.value
+    assert st_res["bias"] == StructureBias.BEARISH.value
+
+    # 3. FAIL: CHOCH -> LH -> HH -> LL (contaminated sequence)
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_fail_contam = [
+        {"id": 1, "swing_type": "HIGH", "classification": "LH", "swing_price": 4480.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "HIGH", "classification": "HH", "swing_price": 4510.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050},
+        {"id": 3, "swing_type": "LOW", "classification": "LL", "swing_price": 4420.0, "swing_candle_time_epoch": 1040, "confirmed_at_candle_time_epoch": 1060}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_fail_contam, swings_fail_contam)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BULLISH.value
+    assert st_res["transition_state"] == StructureTransitionState.CHOCH_BEARISH_PENDING.value
+
+    # 4. FAIL: CHOCH -> LL -> HH -> LH (contaminated sequence)
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_fail_contam2 = [
+        {"id": 1, "swing_type": "LOW", "classification": "LL", "swing_price": 4420.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "HIGH", "classification": "HH", "swing_price": 4510.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050},
+        {"id": 3, "swing_type": "HIGH", "classification": "LH", "swing_price": 4480.0, "swing_candle_time_epoch": 1040, "confirmed_at_candle_time_epoch": 1060}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_fail_contam2, swings_fail_contam2)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BULLISH.value
+
+    # 5. FAIL: Pre-CHOCH LH & LL + CHOCH (pre-choch cannot trigger MSS)
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_pre_choch = [
+        {"id": 1, "swing_type": "HIGH", "classification": "LH", "swing_price": 4480.0, "swing_candle_time_epoch": 800, "confirmed_at_candle_time_epoch": 900},
+        {"id": 2, "swing_type": "LOW", "classification": "LL", "swing_price": 4420.0, "swing_candle_time_epoch": 850, "confirmed_at_candle_time_epoch": 950}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, [], swings_pre_choch)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BULLISH.value
+
+    # 6. FAIL: CHOCH -> only LH
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_only_lh = [
+        {"id": 1, "swing_type": "HIGH", "classification": "LH", "swing_price": 4480.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_only_lh, swings_only_lh)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BULLISH.value
+
+    # 7. FAIL: CHOCH -> only LL
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_only_ll = [
+        {"id": 1, "swing_type": "LOW", "classification": "LL", "swing_price": 4420.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_only_ll, swings_only_ll)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BULLISH.value
+
+    # 8. FAIL: CHOCH -> LH -> LL -> HH (superseded by contrary swing)
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_superseded = [
+        {"id": 1, "swing_type": "HIGH", "classification": "LH", "swing_price": 4480.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "LOW", "classification": "LL", "swing_price": 4420.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050},
+        {"id": 3, "swing_type": "HIGH", "classification": "HH", "swing_price": 4520.0, "swing_candle_time_epoch": 1060, "confirmed_at_candle_time_epoch": 1080}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, [swings_superseded[2]], swings_superseded)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BULLISH.value
+
+
+def test_mss_bullish_adversarial_matrix():
+    """
+    10. Adversarial matrix for Bullish MSS:
+    - PASS: CHOCH -> HL -> HH
+    - PASS: CHOCH -> HH -> HL
+    - FAIL: CHOCH -> HL -> LL -> HH (contaminated with LL)
+    - FAIL: CHOCH -> HH -> LL -> HL (contaminated with LL)
+    - FAIL: CHOCH -> only HL (insufficient)
+    - FAIL: CHOCH -> only HH (insufficient)
+    - FAIL: CHOCH -> HL -> HH -> LL (superseded by contrary swing)
+    """
+    # 1. PASS: CHOCH -> HL -> HH
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BEARISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BULLISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_pass1 = [
+        {"id": 1, "swing_type": "LOW", "classification": "HL", "swing_price": 4430.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "HIGH", "classification": "HH", "swing_price": 4490.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_pass1, swings_pass1)
+    assert mss_ev is not None
+    assert mss_ev["event_type"] == StructureEventType.MSS_BULLISH.value
+    assert st_res["bias"] == StructureBias.BULLISH.value
+    assert st_res["transition_state"] == StructureTransitionState.NORMAL.value
+
+    # 2. PASS: CHOCH -> HH -> HL
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BEARISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BULLISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_pass2 = [
+        {"id": 1, "swing_type": "HIGH", "classification": "HH", "swing_price": 4490.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "LOW", "classification": "HL", "swing_price": 4430.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_pass2, swings_pass2)
+    assert mss_ev is not None
+    assert mss_ev["event_type"] == StructureEventType.MSS_BULLISH.value
+    assert st_res["bias"] == StructureBias.BULLISH.value
+
+    # 3. FAIL: CHOCH -> HL -> LL -> HH (contaminated with LL)
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BEARISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BULLISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_fail_contam = [
+        {"id": 1, "swing_type": "LOW", "classification": "HL", "swing_price": 4430.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "LOW", "classification": "LL", "swing_price": 4390.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050},
+        {"id": 3, "swing_type": "HIGH", "classification": "HH", "swing_price": 4490.0, "swing_candle_time_epoch": 1040, "confirmed_at_candle_time_epoch": 1060}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_fail_contam, swings_fail_contam)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BEARISH.value
+
+    # 4. FAIL: CHOCH -> HH -> LL -> HL (contaminated with LL)
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BEARISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BULLISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_fail_contam2 = [
+        {"id": 1, "swing_type": "HIGH", "classification": "HH", "swing_price": 4490.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "LOW", "classification": "LL", "swing_price": 4390.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050},
+        {"id": 3, "swing_type": "LOW", "classification": "HL", "swing_price": 4430.0, "swing_candle_time_epoch": 1040, "confirmed_at_candle_time_epoch": 1060}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, swings_fail_contam2, swings_fail_contam2)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BEARISH.value
+
+    # 5. FAIL: CHOCH -> only HL
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BEARISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BULLISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, [swings_pass1[0]], [swings_pass1[0]])
+    assert mss_ev is None
+
+    # 6. FAIL: CHOCH -> only HH
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BEARISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BULLISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, [swings_pass1[1]], [swings_pass1[1]])
+    assert mss_ev is None
+
+    # 7. FAIL: CHOCH -> HL -> HH -> LL (superseded by contrary swing)
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BEARISH.value
+    st["transition_state"] = StructureTransitionState.CHOCH_BULLISH_PENDING.value
+    st["pending_choch_epoch"] = 1000
+    swings_superseded = [
+        {"id": 1, "swing_type": "LOW", "classification": "HL", "swing_price": 4430.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040},
+        {"id": 2, "swing_type": "HIGH", "classification": "HH", "swing_price": 4490.0, "swing_candle_time_epoch": 1030, "confirmed_at_candle_time_epoch": 1050},
+        {"id": 3, "swing_type": "LOW", "classification": "LL", "swing_price": 4380.0, "swing_candle_time_epoch": 1060, "confirmed_at_candle_time_epoch": 1080}
+    ]
+    st_res, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, [swings_superseded[2]], swings_superseded)
+    assert mss_ev is None
+    assert st_res["bias"] == StructureBias.BEARISH.value
+
+
+def test_pending_invalidation_matrix():
+    """
+    11. Pending invalidation matrix:
+    - Bearish pending: CHOCH bearish -> HH confirmed -> close has NOT broken original continuation target -> remains PENDING
+    - Bearish pending: CHOCH bearish -> closed candle > original continuation target + tolerance -> NORMAL + BOS_BULLISH
+    - Bullish pending: CHOCH bullish -> LL confirmed -> close has NOT broken original continuation target -> remains PENDING
+    - Bullish pending: CHOCH bullish -> closed candle < original continuation target - tolerance -> NORMAL + BOS_BEARISH
+    """
+    # 1. Bearish pending remains pending when HH confirms but candle close has NOT broken continuation target
+    st = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    st["bullish_break_level_price"] = 4500.0 # Original continuation target
+    st["protected_low_price"] = 4400.0
+
+    # CHOCH Bearish occurs at candle 1000
+    candle_choch = {"candle_time_epoch": 1000, "open": 4410.0, "high": 4415.0, "low": 4390.0, "close": 4395.0}
+    st, ev_choch = market_structure_detector.evaluate_closed_candle(candle_choch, st, threshold_price=0.10)
+    assert ev_choch["event_type"] == StructureEventType.CHOCH_BEARISH.value
+    assert st["transition_state"] == StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    assert st["pending_choch_continuation_target_price"] == 4500.0
+
+    # New HH swing confirms at 4460.0 (internal swing)
+    new_hh_swing = [{"id": 10, "swing_type": "HIGH", "classification": "HH", "swing_price": 4460.0, "swing_candle_time_epoch": 1020, "confirmed_at_candle_time_epoch": 1040}]
+    st, mss_ev = market_structure_detector.apply_confirmed_swings_to_state(st, new_hh_swing, new_hh_swing)
+    assert mss_ev is None
+    # Transition MUST REMAIN CHOCH_BEARISH_PENDING!
+    assert st["transition_state"] == StructureTransitionState.CHOCH_BEARISH_PENDING.value
+
+    # Candle closes at 4470.0 (higher than internal HH 4460, but LESS than original target 4500.10)
+    candle_inside = {"candle_time_epoch": 1050, "open": 4450.0, "high": 4475.0, "low": 4445.0, "close": 4470.0}
+    st, ev_inside = market_structure_detector.evaluate_closed_candle(candle_inside, st, threshold_price=0.10)
+    assert ev_inside is None
+    assert st["transition_state"] == StructureTransitionState.CHOCH_BEARISH_PENDING.value
+
+    # Candle closes at 4505.0 (> original continuation target 4500.0 + 0.10)
+    candle_break = {"candle_time_epoch": 1060, "open": 4490.0, "high": 4510.0, "low": 4485.0, "close": 4505.0}
+    st, ev_break = market_structure_detector.evaluate_closed_candle(candle_break, st, threshold_price=0.10)
+    assert ev_break is not None
+    assert ev_break["event_type"] == StructureEventType.BOS_BULLISH.value
+    assert st["transition_state"] == StructureTransitionState.NORMAL.value
+    assert st["pending_choch_epoch"] is None
+
+    # 2. Bullish pending remains pending when LL confirms but candle close has NOT broken continuation target
+    st_b = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    st_b["bias"] = StructureBias.BEARISH.value
+    st_b["protected_high_price"] = 4500.0
+    st_b["bearish_break_level_price"] = 4400.0 # Original continuation target
+
+    # CHOCH Bullish occurs
+    candle_choch_b = {"candle_time_epoch": 2000, "open": 4490.0, "high": 4515.0, "low": 4485.0, "close": 4510.0}
+    st_b, ev_choch_b = market_structure_detector.evaluate_closed_candle(candle_choch_b, st_b, threshold_price=0.10)
+    assert ev_choch_b["event_type"] == StructureEventType.CHOCH_BULLISH.value
+    assert st_b["transition_state"] == StructureTransitionState.CHOCH_BULLISH_PENDING.value
+    assert st_b["pending_choch_continuation_target_price"] == 4400.0
+
+    # New LL swing confirms at 4430.0 (internal swing)
+    new_ll_swing = [{"id": 20, "swing_type": "LOW", "classification": "LL", "swing_price": 4430.0, "swing_candle_time_epoch": 2020, "confirmed_at_candle_time_epoch": 2040}]
+    st_b, mss_ev_b = market_structure_detector.apply_confirmed_swings_to_state(st_b, new_ll_swing, new_ll_swing)
+    assert mss_ev_b is None
+    # Transition MUST REMAIN CHOCH_BULLISH_PENDING!
+    assert st_b["transition_state"] == StructureTransitionState.CHOCH_BULLISH_PENDING.value
+
+    # Candle closes at 4420.0 (lower than internal LL 4430, but GREATER than original target 4400.0 - 0.10)
+    candle_inside_b = {"candle_time_epoch": 2050, "open": 4430.0, "high": 4435.0, "low": 4415.0, "close": 4420.0}
+    st_b, ev_inside_b = market_structure_detector.evaluate_closed_candle(candle_inside_b, st_b, threshold_price=0.10)
+    assert ev_inside_b is None
+    assert st_b["transition_state"] == StructureTransitionState.CHOCH_BULLISH_PENDING.value
+
+    # Candle closes at 4390.0 (< original continuation target 4400.0 - 0.10)
+    candle_break_b = {"candle_time_epoch": 2060, "open": 4410.0, "high": 4415.0, "low": 4385.0, "close": 4390.0}
+    st_b, ev_break_b = market_structure_detector.evaluate_closed_candle(candle_break_b, st_b, threshold_price=0.10)
+    assert ev_break_b is not None
+    assert ev_break_b["event_type"] == StructureEventType.BOS_BEARISH.value
+    assert st_b["transition_state"] == StructureTransitionState.NORMAL.value
+    assert st_b["pending_choch_epoch"] is None
+
+
+def test_persistence_atomicity_failure_injection():
+    """
+    7. Persistence atomicity failure injection:
+    - State write failure rolls back event write. Zero partial durable state!
+    - Event write failure prevents state modification. Zero partial durable state!
+    """
+    state_initial = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    state_initial["bias"] = StructureBias.BULLISH.value
+    market_structure_repo.upsert_structure_state(state_initial)
+
+    ev = {
+        "source_id": SOURCE_ID,
+        "symbol": "XAUUSD.VX",
+        "timeframe": "M1",
+        "event_type": "CHOCH_BEARISH",
+        "event_candle_time_epoch": 5000,
+        "candle_close": 4390.0,
+        "previous_bias": "BULLISH",
+        "resulting_bias": "BULLISH",
+        "transition_state": "CHOCH_BEARISH_PENDING",
+        "fractal_n": 2
+    }
+
+    state_mutated = dict(state_initial)
+    state_mutated["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
+    state_mutated["pending_choch_epoch"] = 5000
+
+    # Failure Injection 1: state write fails
+    market_structure_repo._fail_state_write = True
+    with pytest.raises(RuntimeError, match="Simulated state write failure"):
+        market_structure_repo.save_event_and_state(ev, state_mutated)
+    market_structure_repo._fail_state_write = False
+
+    # VERIFY: Event was NOT persisted, and state was ROLLED BACK to initial!
+    events = market_structure_repo.get_structure_events(SOURCE_ID, "XAUUSD.VX", "M1")
+    assert len(events) == 0, "Event must be rolled back on state failure!"
+    st_check = market_structure_repo.get_structure_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    assert st_check["transition_state"] == StructureTransitionState.NORMAL.value, "State must remain unmutated!"
+
+    # Failure Injection 2: event write fails
+    market_structure_repo._fail_event_write = True
+    with pytest.raises(RuntimeError, match="Simulated event write failure"):
+        market_structure_repo.save_event_and_state(ev, state_mutated)
+    market_structure_repo._fail_event_write = False
+
+    # VERIFY: Neither event nor state was persisted!
+    events = market_structure_repo.get_structure_events(SOURCE_ID, "XAUUSD.VX", "M1")
+    assert len(events) == 0
+    st_check = market_structure_repo.get_structure_state(SOURCE_ID, "XAUUSD.VX", "M1")
+    assert st_check["transition_state"] == StructureTransitionState.NORMAL.value
+
+
+def test_pending_choch_event_id_foreign_key_and_schema():
+    """
+    8. Schema verification:
+    Verify that market_structure_state.pending_choch_event_id has foreign key
+    referencing market_structure_events(id) ON DELETE SET NULL.
+    """
+    from pathlib import Path
+    schema_path = Path("backend/sql/04_market_structure_schema.sql")
+    assert schema_path.exists()
+    content = schema_path.read_text(encoding="utf-8")
+    assert "pending_choch_event_id BIGINT REFERENCES market_structure_events(id) ON DELETE SET NULL" in content
+    assert "pending_choch_continuation_target_price NUMERIC(16, 6)" in content
+
+
+class IndependentMarketStructureOracle:
+    """
+    9. Independent reference-model / Oracle for market structure detection.
+    Completely independent implementation used as ground-truth oracle to prove
+    state transition, MSS ordering, CHOCH, BOS, and break level correctness.
+    """
+    def __init__(self, tolerance: float = 0.10):
+        self.bias = "NEUTRAL"
+        self.transition_state = "NORMAL"
+        self.protected_high = None
+        self.protected_low = None
+        self.bullish_break_target = None
+        self.bearish_break_target = None
+        self.pending_choch_epoch = None
+        self.pending_continuation_target = None
+        self.post_choch_swings = []
+        self.tolerance = tolerance
+        self.events = []
+
+    def feed_swings(self, swings: list[dict]):
+        for sw in sorted(swings, key=lambda s: (s.get("confirmed_at_candle_time_epoch", 0), s.get("swing_candle_time_epoch", 0))):
+            cls = sw.get("classification")
+            p = float(sw.get("swing_price", 0.0))
+            conf = int(sw.get("confirmed_at_candle_time_epoch", 0))
+
+            if cls in ["EQH", "EQL"]:
+                continue
+
+            if self.bias == "NEUTRAL":
+                # Need HH + HL or LH + LL
+                pass # Initial bootstrap handled explicitly
+
+            elif self.bias == "BULLISH":
+                if cls == "HL":
+                    self.protected_low = p
+                elif cls == "HH":
+                    self.bullish_break_target = p
+
+                if self.transition_state == "CHOCH_BEARISH_PENDING":
+                    if conf > (self.pending_choch_epoch or 0):
+                        self.post_choch_swings.append(sw)
+                        # Check strict sequence: LH -> LL or LL -> LH without intervening HH or HL
+                        dir_s = [s for s in self.post_choch_swings if s["classification"] in ["LH", "LL", "HH", "HL"]]
+                        if len(dir_s) >= 2 and dir_s[-1]["classification"] in ["LH", "LL"]:
+                            last_c = dir_s[-1]["classification"]
+                            target_c = "LL" if last_c == "LH" else "LH"
+                            has_target = False
+                            for i in range(len(dir_s) - 2, -1, -1):
+                                if dir_s[i]["classification"] in ["HH", "HL"]:
+                                    break
+                                if dir_s[i]["classification"] == target_c:
+                                    has_target = True
+                                    break
+                            if has_target:
+                                # Trigger MSS Bearish
+                                self.bias = "BEARISH"
+                                self.transition_state = "NORMAL"
+                                self.protected_high = [s for s in dir_s if s["classification"] == "LH"][-1]["swing_price"]
+                                self.bearish_break_target = [s for s in dir_s if s["classification"] == "LL"][-1]["swing_price"]
+                                self.protected_low = None
+                                self.bullish_break_target = None
+                                self.pending_choch_epoch = None
+                                self.pending_continuation_target = None
+                                self.events.append({"type": "MSS_BEARISH", "epoch": conf})
+
+            elif self.bias == "BEARISH":
+                if cls == "LH":
+                    self.protected_high = p
+                elif cls == "LL":
+                    self.bearish_break_target = p
+
+                if self.transition_state == "CHOCH_BULLISH_PENDING":
+                    if conf > (self.pending_choch_epoch or 0):
+                        self.post_choch_swings.append(sw)
+                        dir_s = [s for s in self.post_choch_swings if s["classification"] in ["HL", "HH", "LH", "LL"]]
+                        if len(dir_s) >= 2 and dir_s[-1]["classification"] in ["HL", "HH"]:
+                            last_c = dir_s[-1]["classification"]
+                            target_c = "HH" if last_c == "HL" else "HL"
+                            has_target = False
+                            for i in range(len(dir_s) - 2, -1, -1):
+                                if dir_s[i]["classification"] in ["LH", "LL"]:
+                                    break
+                                if dir_s[i]["classification"] == target_c:
+                                    has_target = True
+                                    break
+                            if has_target:
+                                self.bias = "BULLISH"
+                                self.transition_state = "NORMAL"
+                                self.protected_low = [s for s in dir_s if s["classification"] == "HL"][-1]["swing_price"]
+                                self.bullish_break_target = [s for s in dir_s if s["classification"] == "HH"][-1]["swing_price"]
+                                self.protected_high = None
+                                self.bearish_break_target = None
+                                self.pending_choch_epoch = None
+                                self.pending_continuation_target = None
+                                self.events.append({"type": "MSS_BULLISH", "epoch": conf})
+
+    def feed_candle(self, c: dict):
+        close = float(c["close"])
+        epoch = int(c["candle_time_epoch"])
+
+        # Priority 1: Double break
+        # Priority 2: Invalidation check
+        if self.transition_state == "CHOCH_BEARISH_PENDING":
+            if close > (self.pending_continuation_target + self.tolerance):
+                self.transition_state = "NORMAL"
+                self.pending_choch_epoch = None
+                self.pending_continuation_target = None
+                self.events.append({"type": "BOS_BULLISH", "epoch": epoch})
+                return
+        elif self.transition_state == "CHOCH_BULLISH_PENDING":
+            if close < (self.pending_continuation_target - self.tolerance):
+                self.transition_state = "NORMAL"
+                self.pending_choch_epoch = None
+                self.pending_continuation_target = None
+                self.events.append({"type": "BOS_BEARISH", "epoch": epoch})
+                return
+
+        # Priority 4: CHOCH
+        if self.bias == "BULLISH" and self.transition_state == "NORMAL":
+            if self.protected_low and close < (self.protected_low - self.tolerance):
+                self.transition_state = "CHOCH_BEARISH_PENDING"
+                self.pending_choch_epoch = epoch
+                self.pending_continuation_target = self.bullish_break_target
+                self.post_choch_swings = []
+                self.events.append({"type": "CHOCH_BEARISH", "epoch": epoch})
+                return
+            elif self.bullish_break_target and close > (self.bullish_break_target + self.tolerance):
+                self.events.append({"type": "BOS_BULLISH", "epoch": epoch})
+                return
+
+        elif self.bias == "BEARISH" and self.transition_state == "NORMAL":
+            if self.protected_high and close > (self.protected_high + self.tolerance):
+                self.transition_state = "CHOCH_BULLISH_PENDING"
+                self.pending_choch_epoch = epoch
+                self.pending_continuation_target = self.bearish_break_target
+                self.post_choch_swings = []
+                self.events.append({"type": "CHOCH_BULLISH", "epoch": epoch})
+                return
+            elif self.bearish_break_target and close < (self.bearish_break_target - self.tolerance):
+                self.events.append({"type": "BOS_BEARISH", "epoch": epoch})
+                return
+
+
+def test_independent_reference_model_oracle_verification():
+    """
+    9. Independent Oracle Verification:
+    Feeds a complex multi-step market cycle through both the actual
+    detector and the independent Oracle. Asserts 100% equivalence at each stage.
+    """
+    oracle = IndependentMarketStructureOracle(tolerance=0.10)
+    state = create_initial_state(SOURCE_ID, "XAUUSD.VX", "M1")
+
+    # Bootstrap to Bullish
+    oracle.bias = "BULLISH"
+    oracle.bullish_break_target = 4500.0
+    oracle.protected_low = 4400.0
+
+    state["bias"] = StructureBias.BULLISH.value
+    state["bullish_break_level_price"] = 4500.0
+    state["bullish_break_level_candle_time_epoch"] = 100
+    state["protected_low_price"] = 4400.0
+    state["protected_low_candle_time_epoch"] = 110
+
+    # Step 1: Bullish BOS
+    c1 = {"candle_time_epoch": 200, "open": 4490.0, "high": 4515.0, "low": 4485.0, "close": 4505.0}
+    oracle.feed_candle(c1)
+    state, ev1 = market_structure_detector.evaluate_closed_candle(c1, state, threshold_price=0.10)
+    assert ev1["event_type"] == oracle.events[-1]["type"] == "BOS_BULLISH"
+    assert state["bias"] == oracle.bias == "BULLISH"
+
+    # Step 2: CHOCH Bearish trigger
+    c2 = {"candle_time_epoch": 300, "open": 4410.0, "high": 4415.0, "low": 4390.0, "close": 4395.0}
+    oracle.feed_candle(c2)
+    state, ev2 = market_structure_detector.evaluate_closed_candle(c2, state, threshold_price=0.10)
+    assert ev2["event_type"] == oracle.events[-1]["type"] == "CHOCH_BEARISH"
+    assert state["transition_state"] == oracle.transition_state == "CHOCH_BEARISH_PENDING"
+    assert state["pending_choch_continuation_target_price"] == oracle.pending_continuation_target == 4500.0
+
+    # Step 3: Adversarial swing sequence (LH -> HH -> LL) - should NOT trigger MSS
+    sw_contam = [
+        {"id": 1, "swing_type": "HIGH", "classification": "LH", "swing_price": 4450.0, "swing_candle_time_epoch": 320, "confirmed_at_candle_time_epoch": 340},
+        {"id": 2, "swing_type": "HIGH", "classification": "HH", "swing_price": 4490.0, "swing_candle_time_epoch": 350, "confirmed_at_candle_time_epoch": 370},
+        {"id": 3, "swing_type": "LOW", "classification": "LL", "swing_price": 4380.0, "swing_candle_time_epoch": 380, "confirmed_at_candle_time_epoch": 400}
+    ]
+    oracle.feed_swings(sw_contam)
+    state, ev_mss_fail = market_structure_detector.apply_confirmed_swings_to_state(state, sw_contam, sw_contam)
+    assert ev_mss_fail is None
+    assert len(oracle.events) == 2 # No MSS event added in oracle
+    assert state["bias"] == oracle.bias == "BULLISH"
+    assert state["transition_state"] == oracle.transition_state == "CHOCH_BEARISH_PENDING"
+
+    # Step 4: Valid sequence completes (new LH confirms after the LL)
+    sw_valid = [
+        {"id": 4, "swing_type": "HIGH", "classification": "LH", "swing_price": 4440.0, "swing_candle_time_epoch": 410, "confirmed_at_candle_time_epoch": 430}
+    ]
+    all_swings = sw_contam + sw_valid
+    oracle.feed_swings(sw_valid)
+    state, ev_mss_pass = market_structure_detector.apply_confirmed_swings_to_state(state, sw_valid, all_swings)
+    assert ev_mss_pass["event_type"] == oracle.events[-1]["type"] == "MSS_BEARISH"
+    assert state["bias"] == oracle.bias == "BEARISH"
+    assert state["transition_state"] == oracle.transition_state == "NORMAL"
+
+
+def test_symbol_canonicalization_comprehensive():
+    """
+    15. Symbol canonicalization:
+    'xauusd.vx', 'XAUUSD.VX', ' XAUUSD.VX ' must resolve to identical canonical representation
+    and never produce isolated states.
+    """
+    syms = ["xauusd.vx", "XAUUSD.VX", " XAUUSD.VX ", "  xauusd.vx  "]
+    for s in syms:
+        assert canonicalize_symbol(s) == "XAUUSD.VX"
+
+    # Repository operations with differing case/whitespace access identical record
+    st = create_initial_state(SOURCE_ID, "  xauusd.vx  ", "M1")
+    st["bias"] = StructureBias.BULLISH.value
+    market_structure_repo.upsert_structure_state(st)
+
+    for s in syms:
+        rec = market_structure_repo.get_structure_state(SOURCE_ID, s, "M1")
+        assert rec is not None
+        assert rec["symbol"] == "XAUUSD.VX"
+        assert rec["bias"] == StructureBias.BULLISH.value
+

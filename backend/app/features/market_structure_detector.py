@@ -46,7 +46,90 @@ def create_initial_state(source_id: str, symbol: str, timeframe: str) -> dict:
         "last_broken_low_candle_time_epoch": None,
         "pending_choch_event_id": None,
         "pending_choch_epoch": None,
+        "pending_choch_continuation_target_price": None,
     }
+
+def check_bearish_mss_sequence(post_choch_swings: list[dict]) -> Optional[tuple[dict, dict]]:
+    """
+    Checks if post_choch_swings contains a valid bearish structural sequence:
+    LH -> LL or LL -> LH without intervening contrary directional swings (HH or HL).
+    The sequence must terminate on a bearish swing (LH or LL), i.e. not superseded by contrary swings.
+    Returns (latest_lh, latest_ll) if valid, else None.
+    """
+    dir_swings = [
+        s for s in post_choch_swings
+        if s.get("classification") in [
+            SwingClassification.LH.value,
+            SwingClassification.LL.value,
+            SwingClassification.HH.value,
+            SwingClassification.HL.value
+        ]
+    ]
+    if len(dir_swings) < 2:
+        return None
+
+    # Latest directional swing must be bearish (LH or LL)
+    last_swing = dir_swings[-1]
+    cls_last = last_swing.get("classification")
+    if cls_last not in [SwingClassification.LH.value, SwingClassification.LL.value]:
+        return None
+
+    target_cls = SwingClassification.LL.value if cls_last == SwingClassification.LH.value else SwingClassification.LH.value
+
+    # Scan backwards from the swing immediately preceding the last swing
+    for i in range(len(dir_swings) - 2, -1, -1):
+        si = dir_swings[i]
+        cls_i = si.get("classification")
+        # If an intervening contrary swing (HH or HL) is encountered, the sequence path is broken
+        if cls_i in [SwingClassification.HH.value, SwingClassification.HL.value]:
+            return None
+        if cls_i == target_cls:
+            lh_swing = si if cls_i == SwingClassification.LH.value else last_swing
+            ll_swing = last_swing if cls_last == SwingClassification.LL.value else si
+            return (lh_swing, ll_swing)
+
+    return None
+
+def check_bullish_mss_sequence(post_choch_swings: list[dict]) -> Optional[tuple[dict, dict]]:
+    """
+    Checks if post_choch_swings contains a valid bullish structural sequence:
+    HL -> HH or HH -> HL without intervening contrary directional swings (LH or LL).
+    The sequence must terminate on a bullish swing (HL or HH), i.e. not superseded by contrary swings.
+    Returns (latest_hl, latest_hh) if valid, else None.
+    """
+    dir_swings = [
+        s for s in post_choch_swings
+        if s.get("classification") in [
+            SwingClassification.HL.value,
+            SwingClassification.HH.value,
+            SwingClassification.LH.value,
+            SwingClassification.LL.value
+        ]
+    ]
+    if len(dir_swings) < 2:
+        return None
+
+    # Latest directional swing must be bullish (HL or HH)
+    last_swing = dir_swings[-1]
+    cls_last = last_swing.get("classification")
+    if cls_last not in [SwingClassification.HL.value, SwingClassification.HH.value]:
+        return None
+
+    target_cls = SwingClassification.HH.value if cls_last == SwingClassification.HL.value else SwingClassification.HL.value
+
+    # Scan backwards from the swing immediately preceding the last swing
+    for i in range(len(dir_swings) - 2, -1, -1):
+        si = dir_swings[i]
+        cls_i = si.get("classification")
+        # If an intervening contrary swing (LH or LL) is encountered, the sequence path is broken
+        if cls_i in [SwingClassification.LH.value, SwingClassification.LL.value]:
+            return None
+        if cls_i == target_cls:
+            hl_swing = si if cls_i == SwingClassification.HL.value else last_swing
+            hh_swing = last_swing if cls_last == SwingClassification.HH.value else si
+            return (hl_swing, hh_swing)
+
+    return None
 
 class MarketStructureDetector:
     """
@@ -63,7 +146,9 @@ class MarketStructureDetector:
     ) -> tuple[dict, Optional[dict]]:
         """
         Step A: Applies newly available confirmed swings to state.
-        Evaluates MSS confirmation or pending CHoCH invalidation via swings.
+        Evaluates MSS confirmation via post-CHOCH sequence validation.
+        NOTE: Pending CHOCH is NEVER cancelled by swing confirmation alone.
+        It can only be invalidated by closed candle break of the continuation target.
         Returns (updated_state, mss_event_if_triggered).
         """
         if not new_swings and not all_confirmed_swings_history:
@@ -74,7 +159,6 @@ class MarketStructureDetector:
 
         # Build full confirmed swings context
         combined_history = list(all_confirmed_swings_history or [])
-        # Ensure new_swings are in history
         history_keys = {(s.get("swing_candle_time_epoch"), s.get("swing_type")) for s in combined_history}
         for sw in new_swings:
             k = (sw.get("swing_candle_time_epoch"), sw.get("swing_type"))
@@ -120,7 +204,6 @@ class MarketStructureDetector:
 
             # 1. Neutral State Bootstrap: Requires HH + HL (Bullish) or LH + LL (Bearish)
             if st["bias"] == StructureBias.NEUTRAL.value:
-                # Filter confirmed history available up to this swing's confirmation time
                 swings_up_to_now = [
                     s for s in combined_history
                     if int(s.get("confirmed_at_candle_time_epoch", 0)) <= conf_epoch
@@ -201,73 +284,64 @@ class MarketStructureDetector:
                     st["bullish_break_level_price"] = p
                     st["bullish_break_level_candle_time_epoch"] = sw_epoch
 
-                # If pending CHoCH Bearish is active, check MSS sequence
+                # If pending CHoCH Bearish is active, check MSS sequence (STRICT SEQUENCE CHECK)
+                # NOTE: A newly confirmed HH does NOT cancel pending CHoCH!
                 if st["transition_state"] == StructureTransitionState.CHOCH_BEARISH_PENDING.value:
                     pending_ep = st.get("pending_choch_epoch") or 0
                     if conf_epoch > pending_ep:
-                        # Invalidation check via confirmed swing: new confirmed HH cancels pending CHoCH
-                        if cls == SwingClassification.HH.value:
+                        post_choch_swings = [
+                            s for s in combined_history
+                            if int(s.get("confirmed_at_candle_time_epoch", 0)) > pending_ep
+                            and int(s.get("confirmed_at_candle_time_epoch", 0)) <= conf_epoch
+                            and s.get("classification") not in [SwingClassification.EQH.value, SwingClassification.EQL.value]
+                        ]
+
+                        # Verify structural sequence: LH -> LL or LL -> LH without intervening contrary swings
+                        mss_pair = check_bearish_mss_sequence(post_choch_swings)
+                        if mss_pair is not None:
+                            latest_lh, latest_ll = mss_pair
+                            mss_event = {
+                                "source_id": st["source_id"],
+                                "symbol": st["symbol"],
+                                "timeframe": st["timeframe"],
+                                "event_type": StructureEventType.MSS_BEARISH.value,
+                                "event_candle_time_epoch": conf_epoch,
+                                "broken_swing_candle_time_epoch": int(latest_ll["swing_candle_time_epoch"]),
+                                "broken_swing_type": latest_ll["swing_type"],
+                                "broken_swing_price": float(latest_ll["swing_price"]),
+                                "broken_high_swing_candle_time_epoch": int(latest_lh["swing_candle_time_epoch"]),
+                                "broken_high_swing_price": float(latest_lh["swing_price"]),
+                                "broken_low_swing_candle_time_epoch": int(latest_ll["swing_candle_time_epoch"]),
+                                "broken_low_swing_price": float(latest_ll["swing_price"]),
+                                "candle_close": float(latest_ll["swing_price"]),
+                                "break_threshold": 0.0,
+                                "previous_bias": StructureBias.BULLISH.value,
+                                "resulting_bias": StructureBias.BEARISH.value,
+                                "transition_state": StructureTransitionState.NORMAL.value,
+                                "fractal_n": int(latest_ll.get("fractal_n", 2)),
+                                "decision_context": {
+                                    "trigger": "POST_CHOCH_LH_AND_LL_SEQUENCE_CONFIRMED",
+                                    "lh_epoch": int(latest_lh["swing_candle_time_epoch"]),
+                                    "ll_epoch": int(latest_ll["swing_candle_time_epoch"]),
+                                    "pending_choch_epoch": pending_ep
+                                }
+                            }
+                            # Flip bias to BEARISH
+                            st["bias"] = StructureBias.BEARISH.value
                             st["transition_state"] = StructureTransitionState.NORMAL.value
+                            st["protected_high_price"] = float(latest_lh["swing_price"])
+                            st["protected_high_candle_time_epoch"] = int(latest_lh["swing_candle_time_epoch"])
+                            st["bearish_break_level_price"] = float(latest_ll["swing_price"])
+                            st["bearish_break_level_candle_time_epoch"] = int(latest_ll["swing_candle_time_epoch"])
+                            st["protected_low_price"] = None
+                            st["protected_low_candle_time_epoch"] = None
+                            st["bullish_break_level_price"] = None
+                            st["bullish_break_level_candle_time_epoch"] = None
+                            st["last_broken_high_candle_time_epoch"] = None
+                            st["last_broken_low_candle_time_epoch"] = None
                             st["pending_choch_epoch"] = None
                             st["pending_choch_event_id"] = None
-                        else:
-                            # Check post-CHoCH confirmed swings (confirmed_at > pending_ep)
-                            # Must have >= 2 confirmed swings with at least 1 LH and at least 1 LL
-                            post_choch_swings = [
-                                s for s in combined_history
-                                if int(s.get("confirmed_at_candle_time_epoch", 0)) > pending_ep
-                                and int(s.get("confirmed_at_candle_time_epoch", 0)) <= conf_epoch
-                                and s.get("classification") not in [SwingClassification.EQH.value, SwingClassification.EQL.value]
-                            ]
-                            has_post_lh = any(s.get("classification") == SwingClassification.LH.value for s in post_choch_swings)
-                            has_post_ll = any(s.get("classification") == SwingClassification.LL.value for s in post_choch_swings)
-
-                            if len(post_choch_swings) >= 2 and has_post_lh and has_post_ll:
-                                # MSS Bearish confirmed!
-                                latest_lh = next(s for s in reversed(post_choch_swings) if s.get("classification") == SwingClassification.LH.value)
-                                latest_ll = next(s for s in reversed(post_choch_swings) if s.get("classification") == SwingClassification.LL.value)
-
-                                mss_event = {
-                                    "source_id": st["source_id"],
-                                    "symbol": st["symbol"],
-                                    "timeframe": st["timeframe"],
-                                    "event_type": StructureEventType.MSS_BEARISH.value,
-                                    "event_candle_time_epoch": conf_epoch,
-                                    "broken_swing_candle_time_epoch": int(latest_ll["swing_candle_time_epoch"]),
-                                    "broken_swing_type": latest_ll["swing_type"],
-                                    "broken_swing_price": float(latest_ll["swing_price"]),
-                                    "broken_high_swing_candle_time_epoch": int(latest_lh["swing_candle_time_epoch"]),
-                                    "broken_high_swing_price": float(latest_lh["swing_price"]),
-                                    "broken_low_swing_candle_time_epoch": int(latest_ll["swing_candle_time_epoch"]),
-                                    "broken_low_swing_price": float(latest_ll["swing_price"]),
-                                    "candle_close": float(latest_ll["swing_price"]),
-                                    "break_threshold": 0.0,
-                                    "previous_bias": StructureBias.BULLISH.value,
-                                    "resulting_bias": StructureBias.BEARISH.value,
-                                    "transition_state": StructureTransitionState.NORMAL.value,
-                                    "fractal_n": int(latest_ll.get("fractal_n", 2)),
-                                    "decision_context": {
-                                        "trigger": "POST_CHOCH_LH_AND_LL_CONFIRMED",
-                                        "lh_epoch": int(latest_lh["swing_candle_time_epoch"]),
-                                        "ll_epoch": int(latest_ll["swing_candle_time_epoch"]),
-                                        "pending_choch_epoch": pending_ep
-                                    }
-                                }
-                                # Flip bias to BEARISH
-                                st["bias"] = StructureBias.BEARISH.value
-                                st["transition_state"] = StructureTransitionState.NORMAL.value
-                                st["protected_high_price"] = float(latest_lh["swing_price"])
-                                st["protected_high_candle_time_epoch"] = int(latest_lh["swing_candle_time_epoch"])
-                                st["bearish_break_level_price"] = float(latest_ll["swing_price"])
-                                st["bearish_break_level_candle_time_epoch"] = int(latest_ll["swing_candle_time_epoch"])
-                                st["protected_low_price"] = None
-                                st["protected_low_candle_time_epoch"] = None
-                                st["bullish_break_level_price"] = None
-                                st["bullish_break_level_candle_time_epoch"] = None
-                                st["last_broken_high_candle_time_epoch"] = None
-                                st["last_broken_low_candle_time_epoch"] = None
-                                st["pending_choch_epoch"] = None
-                                st["pending_choch_event_id"] = None
+                            st["pending_choch_continuation_target_price"] = None
 
             # 3. Bearish State Updates & MSS Tracking
             elif st["bias"] == StructureBias.BEARISH.value:
@@ -278,73 +352,64 @@ class MarketStructureDetector:
                     st["bearish_break_level_price"] = p
                     st["bearish_break_level_candle_time_epoch"] = sw_epoch
 
-                # If pending CHoCH Bullish is active, check MSS sequence
+                # If pending CHoCH Bullish is active, check MSS sequence (STRICT SEQUENCE CHECK)
+                # NOTE: A newly confirmed LL does NOT cancel pending CHoCH!
                 if st["transition_state"] == StructureTransitionState.CHOCH_BULLISH_PENDING.value:
                     pending_ep = st.get("pending_choch_epoch") or 0
                     if conf_epoch > pending_ep:
-                        # Invalidation check via confirmed swing: new confirmed LL cancels pending CHoCH
-                        if cls == SwingClassification.LL.value:
+                        post_choch_swings = [
+                            s for s in combined_history
+                            if int(s.get("confirmed_at_candle_time_epoch", 0)) > pending_ep
+                            and int(s.get("confirmed_at_candle_time_epoch", 0)) <= conf_epoch
+                            and s.get("classification") not in [SwingClassification.EQH.value, SwingClassification.EQL.value]
+                        ]
+
+                        # Verify structural sequence: HL -> HH or HH -> HL without intervening contrary swings
+                        mss_pair = check_bullish_mss_sequence(post_choch_swings)
+                        if mss_pair is not None:
+                            latest_hl, latest_hh = mss_pair
+                            mss_event = {
+                                "source_id": st["source_id"],
+                                "symbol": st["symbol"],
+                                "timeframe": st["timeframe"],
+                                "event_type": StructureEventType.MSS_BULLISH.value,
+                                "event_candle_time_epoch": conf_epoch,
+                                "broken_swing_candle_time_epoch": int(latest_hh["swing_candle_time_epoch"]),
+                                "broken_swing_type": latest_hh["swing_type"],
+                                "broken_swing_price": float(latest_hh["swing_price"]),
+                                "broken_high_swing_candle_time_epoch": int(latest_hh["swing_candle_time_epoch"]),
+                                "broken_high_swing_price": float(latest_hh["swing_price"]),
+                                "broken_low_swing_candle_time_epoch": int(latest_hl["swing_candle_time_epoch"]),
+                                "broken_low_swing_price": float(latest_hl["swing_price"]),
+                                "candle_close": float(latest_hh["swing_price"]),
+                                "break_threshold": 0.0,
+                                "previous_bias": StructureBias.BEARISH.value,
+                                "resulting_bias": StructureBias.BULLISH.value,
+                                "transition_state": StructureTransitionState.NORMAL.value,
+                                "fractal_n": int(latest_hh.get("fractal_n", 2)),
+                                "decision_context": {
+                                    "trigger": "POST_CHOCH_HL_AND_HH_SEQUENCE_CONFIRMED",
+                                    "hl_epoch": int(latest_hl["swing_candle_time_epoch"]),
+                                    "hh_epoch": int(latest_hh["swing_candle_time_epoch"]),
+                                    "pending_choch_epoch": pending_ep
+                                }
+                            }
+                            # Flip bias to BULLISH
+                            st["bias"] = StructureBias.BULLISH.value
                             st["transition_state"] = StructureTransitionState.NORMAL.value
+                            st["protected_low_price"] = float(latest_hl["swing_price"])
+                            st["protected_low_candle_time_epoch"] = int(latest_hl["swing_candle_time_epoch"])
+                            st["bullish_break_level_price"] = float(latest_hh["swing_price"])
+                            st["bullish_break_level_candle_time_epoch"] = int(latest_hh["swing_candle_time_epoch"])
+                            st["protected_high_price"] = None
+                            st["protected_high_candle_time_epoch"] = None
+                            st["bearish_break_level_price"] = None
+                            st["bearish_break_level_candle_time_epoch"] = None
+                            st["last_broken_high_candle_time_epoch"] = None
+                            st["last_broken_low_candle_time_epoch"] = None
                             st["pending_choch_epoch"] = None
                             st["pending_choch_event_id"] = None
-                        else:
-                            # Check post-CHoCH confirmed swings (confirmed_at > pending_ep)
-                            # Must have >= 2 confirmed swings with at least 1 HL and at least 1 HH
-                            post_choch_swings = [
-                                s for s in combined_history
-                                if int(s.get("confirmed_at_candle_time_epoch", 0)) > pending_ep
-                                and int(s.get("confirmed_at_candle_time_epoch", 0)) <= conf_epoch
-                                and s.get("classification") not in [SwingClassification.EQH.value, SwingClassification.EQL.value]
-                            ]
-                            has_post_hl = any(s.get("classification") == SwingClassification.HL.value for s in post_choch_swings)
-                            has_post_hh = any(s.get("classification") == SwingClassification.HH.value for s in post_choch_swings)
-
-                            if len(post_choch_swings) >= 2 and has_post_hl and has_post_hh:
-                                # MSS Bullish confirmed!
-                                latest_hl = next(s for s in reversed(post_choch_swings) if s.get("classification") == SwingClassification.HL.value)
-                                latest_hh = next(s for s in reversed(post_choch_swings) if s.get("classification") == SwingClassification.HH.value)
-
-                                mss_event = {
-                                    "source_id": st["source_id"],
-                                    "symbol": st["symbol"],
-                                    "timeframe": st["timeframe"],
-                                    "event_type": StructureEventType.MSS_BULLISH.value,
-                                    "event_candle_time_epoch": conf_epoch,
-                                    "broken_swing_candle_time_epoch": int(latest_hh["swing_candle_time_epoch"]),
-                                    "broken_swing_type": latest_hh["swing_type"],
-                                    "broken_swing_price": float(latest_hh["swing_price"]),
-                                    "broken_high_swing_candle_time_epoch": int(latest_hh["swing_candle_time_epoch"]),
-                                    "broken_high_swing_price": float(latest_hh["swing_price"]),
-                                    "broken_low_swing_candle_time_epoch": int(latest_hl["swing_candle_time_epoch"]),
-                                    "broken_low_swing_price": float(latest_hl["swing_price"]),
-                                    "candle_close": float(latest_hh["swing_price"]),
-                                    "break_threshold": 0.0,
-                                    "previous_bias": StructureBias.BEARISH.value,
-                                    "resulting_bias": StructureBias.BULLISH.value,
-                                    "transition_state": StructureTransitionState.NORMAL.value,
-                                    "fractal_n": int(latest_hh.get("fractal_n", 2)),
-                                    "decision_context": {
-                                        "trigger": "POST_CHOCH_HL_AND_HH_CONFIRMED",
-                                        "hl_epoch": int(latest_hl["swing_candle_time_epoch"]),
-                                        "hh_epoch": int(latest_hh["swing_candle_time_epoch"]),
-                                        "pending_choch_epoch": pending_ep
-                                    }
-                                }
-                                # Flip bias to BULLISH
-                                st["bias"] = StructureBias.BULLISH.value
-                                st["transition_state"] = StructureTransitionState.NORMAL.value
-                                st["protected_low_price"] = float(latest_hl["swing_price"])
-                                st["protected_low_candle_time_epoch"] = int(latest_hl["swing_candle_time_epoch"])
-                                st["bullish_break_level_price"] = float(latest_hh["swing_price"])
-                                st["bullish_break_level_candle_time_epoch"] = int(latest_hh["swing_candle_time_epoch"])
-                                st["protected_high_price"] = None
-                                st["protected_high_candle_time_epoch"] = None
-                                st["bearish_break_level_price"] = None
-                                st["bearish_break_level_candle_time_epoch"] = None
-                                st["last_broken_high_candle_time_epoch"] = None
-                                st["last_broken_low_candle_time_epoch"] = None
-                                st["pending_choch_epoch"] = None
-                                st["pending_choch_event_id"] = None
+                            st["pending_choch_continuation_target_price"] = None
 
         return st, mss_event
 
@@ -361,7 +426,7 @@ class MarketStructureDetector:
         Returns (updated_state, event_if_triggered).
         Strict event priority:
         1. DOUBLE_BREAK
-        2. Pending-state invalidation
+        2. Pending-state invalidation (closed candle break past continuation target)
         3. (MSS confirmation evaluated in Step A)
         4. CHOCH
         5. BOS
@@ -431,12 +496,15 @@ class MarketStructureDetector:
             return st, event
 
         # Priority 2: Invalidation check via candle close for pending CHoCH
+        # Bearish pending is invalidated ONLY if closed candle breaks original bullish continuation target + tolerance
         if st["transition_state"] == StructureTransitionState.CHOCH_BEARISH_PENDING.value:
-            if break_high and target_high_price is not None:
+            inval_target = st.get("pending_choch_continuation_target_price") or target_high_price
+            if inval_target is not None and round(c_close, 8) > round(inval_target + threshold_price, 8):
                 # Bullish continuation target reached! Cancel pending CHoCH
                 st["transition_state"] = StructureTransitionState.NORMAL.value
                 st["pending_choch_epoch"] = None
                 st["pending_choch_event_id"] = None
+                st["pending_choch_continuation_target_price"] = None
                 if target_high_epoch != st.get("last_broken_high_candle_time_epoch"):
                     st["last_broken_high_candle_time_epoch"] = target_high_epoch
                     event = {
@@ -447,7 +515,7 @@ class MarketStructureDetector:
                         "event_candle_time_epoch": c_epoch,
                         "broken_swing_candle_time_epoch": target_high_epoch,
                         "broken_swing_type": SwingType.HIGH.value,
-                        "broken_swing_price": target_high_price,
+                        "broken_swing_price": inval_target,
                         "candle_close": c_close,
                         "break_threshold": threshold_price,
                         "previous_bias": StructureBias.BULLISH.value,
@@ -455,7 +523,7 @@ class MarketStructureDetector:
                         "transition_state": StructureTransitionState.NORMAL.value,
                         "fractal_n": fractal_n,
                         "decision_context": {
-                            "broken_level": target_high_price,
+                            "broken_level": inval_target,
                             "close": c_close,
                             "note": "CANCELLED_PENDING_CHOCH_AND_BOS"
                         }
@@ -463,12 +531,15 @@ class MarketStructureDetector:
                     return st, event
                 return st, None
 
+        # Bullish pending is invalidated ONLY if closed candle breaks original bearish continuation target - tolerance
         elif st["transition_state"] == StructureTransitionState.CHOCH_BULLISH_PENDING.value:
-            if break_low and target_low_price is not None:
+            inval_target = st.get("pending_choch_continuation_target_price") or target_low_price
+            if inval_target is not None and round(c_close, 8) < round(inval_target - threshold_price, 8):
                 # Bearish continuation target reached! Cancel pending CHoCH
                 st["transition_state"] = StructureTransitionState.NORMAL.value
                 st["pending_choch_epoch"] = None
                 st["pending_choch_event_id"] = None
+                st["pending_choch_continuation_target_price"] = None
                 if target_low_epoch != st.get("last_broken_low_candle_time_epoch"):
                     st["last_broken_low_candle_time_epoch"] = target_low_epoch
                     event = {
@@ -479,7 +550,7 @@ class MarketStructureDetector:
                         "event_candle_time_epoch": c_epoch,
                         "broken_swing_candle_time_epoch": target_low_epoch,
                         "broken_swing_type": SwingType.LOW.value,
-                        "broken_swing_price": target_low_price,
+                        "broken_swing_price": inval_target,
                         "candle_close": c_close,
                         "break_threshold": threshold_price,
                         "previous_bias": StructureBias.BEARISH.value,
@@ -487,7 +558,7 @@ class MarketStructureDetector:
                         "transition_state": StructureTransitionState.NORMAL.value,
                         "fractal_n": fractal_n,
                         "decision_context": {
-                            "broken_level": target_low_price,
+                            "broken_level": inval_target,
                             "close": c_close,
                             "note": "CANCELLED_PENDING_CHOCH_AND_BOS"
                         }
@@ -500,6 +571,7 @@ class MarketStructureDetector:
             if break_low and target_low_price is not None:
                 st["transition_state"] = StructureTransitionState.CHOCH_BEARISH_PENDING.value
                 st["pending_choch_epoch"] = c_epoch
+                st["pending_choch_continuation_target_price"] = target_high_price
                 event = {
                     "source_id": st["source_id"],
                     "symbol": st["symbol"],
@@ -523,6 +595,7 @@ class MarketStructureDetector:
             if break_high and target_high_price is not None:
                 st["transition_state"] = StructureTransitionState.CHOCH_BULLISH_PENDING.value
                 st["pending_choch_epoch"] = c_epoch
+                st["pending_choch_continuation_target_price"] = target_low_price
                 event = {
                     "source_id": st["source_id"],
                     "symbol": st["symbol"],

@@ -191,6 +191,9 @@ class MarketDataService:
             limit=10000
         )
 
+        # Clear stale structure events and state for this dataset before full rebuild
+        market_structure_repo.clear_structure_for_timeframe(source_id, symbol, timeframe)
+
         state = create_initial_state(source_id, symbol, timeframe)
         threshold_price = get_break_tolerance_price(symbol, source_id)
 
